@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,10 +16,12 @@ import (
 
 // Reconciler orchestrates DNS record lifecycle.
 type Reconciler struct {
-	store    store.Store
-	provider unifi.DNSProvider
-	hostIP   string
-	log      *slog.Logger
+	store       store.Store
+	provider    unifi.DNSProvider
+	hostIP      string
+	resolveOnce sync.Once
+	resolveErr  error
+	log         *slog.Logger
 }
 
 // New creates a Reconciler. hostIP may be empty (inferred on first use).
@@ -30,15 +33,13 @@ func (r *Reconciler) resolvedIP(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	if r.hostIP != "" {
-		return r.hostIP, nil
+	r.resolveOnce.Do(func() {
+		r.hostIP, r.resolveErr = resolver.HostIP("")
+	})
+	if r.resolveErr != nil {
+		return "", r.resolveErr
 	}
-	ip, err := resolver.HostIP("")
-	if err != nil {
-		return "", err
-	}
-	r.hostIP = ip
-	return ip, nil
+	return r.hostIP, nil
 }
 
 // HandleEvent processes a single Docker container event.
@@ -115,7 +116,7 @@ func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 	}
 	if err := r.provider.DeleteRecord(ctx, rec.UnifiRecordID); err != nil {
 		r.log.Error("failed to delete unifi record", "unifi_id", rec.UnifiRecordID, "err", err)
-		return err
+		return fmt.Errorf("reconciler: delete unifi record: %w", err)
 	}
 	r.log.Info("deleted DNS record", "hostname", rec.Hostname, "container", e.ContainerID)
 	return nil
