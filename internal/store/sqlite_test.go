@@ -155,3 +155,27 @@ func TestSQLite_ListAll_Empty(t *testing.T) {
 		t.Errorf("expected 0 records, got %d", len(all))
 	}
 }
+
+func TestSQLite_Delete(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	r := store.Record{
+		ID: "uuid-direct-del", ContainerID: "container-direct-del",
+		Hostname: "direct.home.arpa", IP: "192.168.1.20", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-direct",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := s.Create(ctx, r); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.Delete(ctx, "uuid-direct-del"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := s.GetByContainerID(ctx, "container-direct-del")
+	if err != nil {
+		t.Fatalf("GetByContainerID after delete: %v", err)
+	}
+	if got != nil {
+		t.Error("expected nil after Delete")
+	}
+}
