@@ -168,3 +168,17 @@ func TestParseLabels_EnabledInvalid(t *testing.T) {
 		t.Fatal("expected error for invalid enabled value")
 	}
 }
+
+func TestParseLabels_ExplicitRecordType(t *testing.T) {
+	labels := map[string]string{
+		"dns.bollard/hostname":    "myapp.home.arpa",
+		"dns.bollard/record-type": "A",
+	}
+	spec, err := docker.ParseLabels(labels)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spec.RecordType != "A" {
+		t.Errorf("expected RecordType=A, got %q", spec.RecordType)
+	}
+}

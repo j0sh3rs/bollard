@@ -43,6 +43,7 @@ func ParseLabels(labels map[string]string) (*RecordSpec, error) {
 		if rt != "A" {
 			return nil, fmt.Errorf("label %s: unsupported record type %q (MVP supports A only)", labelRecordType, rt)
 		}
+		spec.RecordType = rt
 	}
 	if ttlStr, ok := labels[labelTTL]; ok {
 		ttl, err := strconv.Atoi(ttlStr)
