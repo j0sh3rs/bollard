@@ -1,6 +1,6 @@
 module github.com/j0sh3rs/bollard
 
-go 1.23
+go 1.25.0
 
 require github.com/caarlos0/env/v11 v11.4.1
 
