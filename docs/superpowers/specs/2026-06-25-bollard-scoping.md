@@ -221,26 +221,24 @@ These must be settled before any code is written:
 
 ---
 
-## Open Questions (Require Operator Input Before Design)
+## Open Questions (Resolved)
 
-1. **UniFi credential role:** What is the minimum UniFi role that permits DNS
-   record CRUD via the API? Does UniFi expose a DNS-only role or does this
-   require Network Admin?
+1. **UniFi credential role:** Network Admin required — UniFi does not expose a
+   DNS-only role. Document as a security caveat in README; operator must create
+   a dedicated local account rather than using the primary admin credential.
 
-2. **Reconcile interval default:** Is `5m` acceptable, or do you want faster
-   convergence (e.g. `1m`) given this is a single-instance homelab tool?
+2. **Reconcile interval:** Configurable via env var, default `5m`.
 
-3. **Release cadence / versioning:** release-please is confirmed. Confirm
-   semantic versioning (`v0.x.y` pre-1.0 until MVP is stable).
+3. **Release cadence / versioning:** `v0.x.y` pre-1.0 with release-please.
+   Confirmed.
 
-4. **Log format:** structured (JSON) or human-readable (logfmt)? Both are
-   common in Go; logfmt is easier to read in `docker logs`, JSON easier to
-   ship to a log aggregator.
+4. **Log format:** Both logfmt and JSON supported, configurable via `LOG_FORMAT`
+   env var. Default: logfmt (readable in `docker logs`).
 
-5. **Container restart policy interaction:** if a container restarts (not
-   `die`+`start` — a Docker-managed restart), does bollard see both events?
-   Needs verification against Docker SDK event behavior to confirm reconcile
-   loop covers this gap or events are sufficient.
+5. **Container restart policy interaction:** Unresolved — needs empirical
+   verification. Reconcile loop is the safety net regardless; if Docker-managed
+   restarts suppress `die`+`start` events, the loop catches drift within one
+   interval.
 
 ---
 
