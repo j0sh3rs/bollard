@@ -1,2 +1,100 @@
 # bollard
-External DNS Provider for Docker Apps
+
+Docker label-driven DNS controller for UniFi Network controllers. Watches Docker container events and creates/deletes A records automatically — no manual static-DNS editing required.
+
+## How it works
+
+bollard subscribes to the Docker event stream. When a container with a `dns.bollard/hostname` label starts, bollard creates a matching A record in your UniFi controller. When the container stops, the record is deleted. A periodic reconcile loop self-heals missed events. Ownership is tracked in a local SQLite database so bollard never modifies records it did not create.
+
+## Label reference
+
+| Label | Required | Default | Description |
+|---|---|---|---|
+| `dns.bollard/hostname` | Yes | — | FQDN for the DNS record. Opts the container in. |
+| `dns.bollard/record-type` | No | `A` | Record type. A only in current release. |
+| `dns.bollard/ttl` | No | `300` | TTL in seconds. |
+| `dns.bollard/ip-override` | No | Host IP | Override the inferred NAS host IP. |
+| `dns.bollard/enabled` | No | `true` | Set to `false` to suppress DNS management without removing labels. |
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `UNIFI_HOST` | required | UniFi controller URL, e.g. `https://unifi.home.arpa` |
+| `UNIFI_API_KEY` | required | API key for a dedicated local UniFi account (see below) |
+| `UNIFI_SITE` | `default` | UniFi site name |
+| `UNIFI_SKIP_TLS_VERIFY` | `true` | Skip TLS verification |
+| `UNIFI_CA_CERT` | — | Path to custom CA certificate PEM file |
+| `DATABASE_URL` | `file:bollard.db` | SQLite DSN. Use an absolute path in production. |
+| `RECONCILE_INTERVAL` | `5m` | How often the reconcile loop runs |
+| `LOG_FORMAT` | `logfmt` | `logfmt` or `json` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+
+## Quickstart
+
+```yaml
+# docker-compose.yml
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    environment:
+      UNIFI_HOST: https://unifi.home.arpa
+      UNIFI_API_KEY: ${UNIFI_API_KEY}
+      DATABASE_URL: file:/data/bollard.db
+
+volumes:
+  bollard-data:
+```
+
+Label a container:
+
+```yaml
+services:
+  myapp:
+    image: myapp:latest
+    labels:
+      dns.bollard/hostname: myapp.home.arpa
+```
+
+## UniFi credential setup
+
+> **Security caveat:** UniFi does not offer a DNS-only role. bollard requires a local account with the **Network Admin** role. Create a dedicated local account (e.g. `bollard`) rather than using your primary admin credential. Do not use a Ubiquiti SSO account.
+
+1. UniFi Network → Settings → Admins & Users → Add local admin
+2. Role: Network Admin
+3. Generate an API key in the account settings
+4. Set `UNIFI_API_KEY` in your compose environment or `.env` file
+
+## Recovering after state loss (`--adopt`)
+
+If the bollard database is lost but containers are still running:
+
+```yaml
+services:
+  bollard:
+    command: ["--adopt"]
+    # rest of config unchanged
+```
+
+bollard scans running containers, matches existing UniFi records by hostname + IP, and reclaims ownership. After adopt completes it transitions to normal operation automatically. `--adopt` never deletes records.
+
+## Failure modes
+
+| Failure | Behavior |
+|---|---|
+| UniFi unreachable at startup | Retries with exponential backoff. Does not crash. |
+| UniFi write fails | Logged. Reconcile loop retries on next tick. |
+| Container dies without a stop event | Reconcile loop cleans up the orphaned record within one interval. |
+| State database unavailable | Fatal — bollard exits. Fix the `DATABASE_URL` and restart. |
+| Docker socket unavailable | Fatal — bollard exits. |
+
+## Known limitations
+
+- A records only. CNAME and other types are planned post-MVP.
+- Duplicate hostnames across two containers are not supported. The second container is left unregistered with a logged error.
+- Record value is the NAS host IP (host networking). Use `dns.bollard/ip-override` for other values.

@@ -1,0 +1,20 @@
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    environment:
+      UNIFI_HOST: https://unifi.home.arpa
+      UNIFI_API_KEY: ${UNIFI_API_KEY}
+      UNIFI_SITE: default
+      UNIFI_SKIP_TLS_VERIFY: "true"
+      DATABASE_URL: file:/data/bollard.db
+      RECONCILE_INTERVAL: 5m
+      LOG_FORMAT: logfmt
+      LOG_LEVEL: info
+
+volumes:
+  bollard-data:
