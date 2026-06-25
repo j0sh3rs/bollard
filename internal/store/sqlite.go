@@ -74,15 +74,14 @@ func (s *sqliteStore) Delete(ctx context.Context, id string) error {
 }
 
 func (s *sqliteStore) DeleteByContainerID(ctx context.Context, containerID string) (*Record, error) {
-	r, err := s.GetByContainerID(ctx, containerID)
+	row := s.db.QueryRowContext(ctx,
+		`DELETE FROM records WHERE container_id = ?
+		 RETURNING id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at`,
+		containerID,
+	)
+	r, err := scanRecord(row)
 	if err != nil {
-		return nil, err
-	}
-	if r == nil {
-		return nil, nil
-	}
-	if err := s.Delete(ctx, r.ID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("store: delete by container id: %w", err)
 	}
 	return r, nil
 }
@@ -134,7 +133,13 @@ func scanRecord(s scanner) (*Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: scan record: %w", err)
 	}
-	r.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
-	r.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
+	r.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse created_at: %w", err)
+	}
+	r.UpdatedAt, err = time.Parse(time.RFC3339, updatedStr)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse updated_at: %w", err)
+	}
 	return &r, nil
 }

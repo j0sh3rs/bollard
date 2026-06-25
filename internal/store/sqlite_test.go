@@ -144,15 +144,6 @@ func TestSQLite_GetByContainerID_NotFound(t *testing.T) {
 	}
 }
 
-func TestSQLite_BadDSN(t *testing.T) {
-	// A DSN that will fail to open should return an error.
-	// modernc.org/sqlite accepts most strings, but an invalid URI flag causes a parse error.
-	_, err := store.NewSQLite("file:///\x00invalid")
-	if err == nil {
-		t.Log("note: bad DSN did not error (driver accepted it)")
-	}
-}
-
 func TestSQLite_ListAll_Empty(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
