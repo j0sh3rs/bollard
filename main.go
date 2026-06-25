@@ -62,14 +62,25 @@ func main() {
 	}
 	defer watcher.Close()
 
-	rec := reconciler.New(db, provider, "", logger)
+	listerClient, err := dockerclient.NewClientWithOpts(
+		dockerclient.FromEnv,
+		dockerclient.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		logger.Error("docker client for lister unavailable", "err", err)
+		os.Exit(1)
+	}
+	defer listerClient.Close()
+
+	lister := &dockerLister{client: listerClient}
+	rec := reconciler.New(db, provider, lister, "", logger)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
 	if *adopt {
 		logger.Info("starting adopt phase")
-		running, err := listRunningContainers(ctx)
+		running, err := lister.ListRunning(ctx)
 		if err != nil {
 			logger.Error("adopt: list containers failed", "err", err)
 			os.Exit(1)
@@ -112,16 +123,12 @@ func main() {
 	}
 }
 
-func listRunningContainers(ctx context.Context) (map[string]map[string]string, error) {
-	c, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	containers, err := c.ContainerList(ctx, container.ListOptions{})
+type dockerLister struct {
+	client *dockerclient.Client
+}
+
+func (d *dockerLister) ListRunning(ctx context.Context) (map[string]map[string]string, error) {
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return nil, err
 	}

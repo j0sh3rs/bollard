@@ -14,10 +14,16 @@ import (
 	"github.com/j0sh3rs/bollard/internal/unifi"
 )
 
+// ContainerLister returns a snapshot of running containers with their labels.
+type ContainerLister interface {
+	ListRunning(ctx context.Context) (map[string]map[string]string, error)
+}
+
 // Reconciler orchestrates DNS record lifecycle.
 type Reconciler struct {
 	store       store.Store
 	provider    unifi.DNSProvider
+	lister      ContainerLister
 	hostIP      string
 	resolveOnce sync.Once
 	resolveErr  error
@@ -25,8 +31,8 @@ type Reconciler struct {
 }
 
 // New creates a Reconciler. hostIP may be empty (inferred on first use).
-func New(s store.Store, p unifi.DNSProvider, hostIP string, log *slog.Logger) *Reconciler {
-	return &Reconciler{store: s, provider: p, hostIP: hostIP, log: log}
+func New(s store.Store, p unifi.DNSProvider, lister ContainerLister, hostIP string, log *slog.Logger) *Reconciler {
+	return &Reconciler{store: s, provider: p, lister: lister, hostIP: hostIP, log: log}
 }
 
 func (r *Reconciler) resolvedIP(override string) (string, error) {
@@ -122,8 +128,11 @@ func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 	return nil
 }
 
-// Reconcile performs one full reconcile tick. Orphaned store rows (where the
-// UniFi record has already been deleted externally) are removed.
+// Reconcile performs one full reconcile tick. It performs two passes:
+//  1. Orphan cleanup: store rows whose UniFi record has been deleted externally
+//     are removed from the store.
+//  2. Missed-event recovery: running containers that carry bollard labels but
+//     have no store row (e.g. events dropped during a restart) are registered.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	storeRecords, err := r.store.ListAll(ctx)
 	if err != nil {
@@ -133,6 +142,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reconciler: list unifi records: %w", err)
 	}
+
+	// Pass 1: remove store rows whose UniFi record no longer exists.
 	unifiIndex := map[string]struct{}{}
 	for _, ur := range unifiRecords {
 		unifiIndex[ur.ID] = struct{}{}
@@ -142,6 +153,35 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			r.log.Warn("orphaned store record, cleaning up",
 				"hostname", sr.Hostname, "unifi_id", sr.UnifiRecordID)
 			_ = r.store.Delete(ctx, sr.ID)
+		}
+	}
+
+	// Pass 2: missed-event recovery — running containers with labels but no store row.
+	if r.lister == nil {
+		return nil
+	}
+	running, err := r.lister.ListRunning(ctx)
+	if err != nil {
+		r.log.Warn("reconcile: list running containers failed", "err", err)
+		return nil // best-effort; don't fail the full tick
+	}
+	storeIndex := map[string]struct{}{}
+	for _, sr := range storeRecords {
+		storeIndex[sr.ContainerID] = struct{}{}
+	}
+	for containerID, labels := range running {
+		if _, owned := storeIndex[containerID]; owned {
+			continue
+		}
+		spec, err := docker.ParseLabels(labels)
+		if err != nil || spec == nil || !spec.Enabled {
+			continue
+		}
+		r.log.Info("reconcile: creating record for unlabeled running container", "container", containerID)
+		if err := r.handleStart(ctx, docker.Event{
+			Type: "start", ContainerID: containerID, Labels: labels,
+		}); err != nil {
+			r.log.Error("reconcile: missed-event recovery failed", "container", containerID, "err", err)
 		}
 	}
 	return nil

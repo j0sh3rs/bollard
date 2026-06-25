@@ -56,6 +56,14 @@ func (f *fakeStore) ListAll(_ context.Context) ([]store.Record, error) {
 }
 func (f *fakeStore) Close() error { return nil }
 
+type fakeLister struct {
+	containers map[string]map[string]string
+}
+
+func (f *fakeLister) ListRunning(_ context.Context) (map[string]map[string]string, error) {
+	return f.containers, nil
+}
+
 type fakeProvider struct {
 	records map[string]unifi.DNSRecord
 	nextID  int
@@ -86,7 +94,7 @@ func (f *fakeProvider) DeleteRecord(_ context.Context, id string) error {
 func TestHandleEvent_Start(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
-	r := reconciler.New(s, p, "192.168.1.1", slog.Default())
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", slog.Default())
 
 	err := r.HandleEvent(context.Background(), docker.Event{
 		Type:        "start",
@@ -108,7 +116,7 @@ func TestHandleEvent_Start(t *testing.T) {
 func TestHandleEvent_Stop(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
-	r := reconciler.New(s, p, "192.168.1.1", slog.Default())
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", slog.Default())
 
 	_ = s.Create(context.Background(), store.Record{
 		ID: "rec-1", ContainerID: "container-456",
@@ -138,7 +146,7 @@ func TestHandleEvent_Stop(t *testing.T) {
 func TestHandleEvent_DuplicateHostname(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
-	r := reconciler.New(s, p, "192.168.1.1", slog.Default())
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", slog.Default())
 
 	_ = r.HandleEvent(context.Background(), docker.Event{
 		Type: "start", ContainerID: "c1",
