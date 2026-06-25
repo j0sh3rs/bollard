@@ -169,8 +169,11 @@ func (p *legacyProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 		return "", fmt.Errorf("unifi: legacy create: %w", err)
 	}
 	var resp staticDNSResponse
-	if err := json.Unmarshal(data, &resp); err != nil || len(resp.Data) == 0 {
-		return "", fmt.Errorf("unifi: parse legacy create response")
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return "", fmt.Errorf("unifi: parse legacy create response: %w", err)
+	}
+	if len(resp.Data) == 0 {
+		return "", fmt.Errorf("unifi: legacy create returned empty response")
 	}
 	return resp.Data[0].ID, nil
 }
