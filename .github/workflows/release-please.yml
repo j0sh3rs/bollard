@@ -1,0 +1,45 @@
+---
+name: release-please
+"on":
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.release_created }}
+
+      - uses: actions/setup-go@v5
+        if: ${{ steps.release.outputs.release_created }}
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binaries
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
+            -o bollard-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" \
+            -o bollard-linux-arm64 .
+
+      - name: Upload release artifacts
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ steps.release.outputs.tag_name }} \
+            bollard-linux-amd64 \
+            bollard-linux-arm64
