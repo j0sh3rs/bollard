@@ -122,7 +122,10 @@ func (t *httpTransport) shouldRetry(method string, status int, _ error) bool {
 func (t *httpTransport) backoff(attempt int) time.Duration {
 	base := t.cfg.RetryInitialDelay
 	exp := time.Duration(math.Pow(2, float64(attempt-1))) * base
-	jitter := time.Duration(rand.Int64N(int64(base / 2)))
+	var jitter time.Duration
+	if half := int64(base / 2); half > 0 {
+		jitter = time.Duration(rand.Int64N(half))
+	}
 	wait := exp + jitter
 	if wait > t.cfg.RetryMaxDelay {
 		return t.cfg.RetryMaxDelay
