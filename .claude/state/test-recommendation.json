@@ -1,0 +1,7 @@
+{
+  "timestamp": "2026-06-25T21:31:31Z",
+  "changed_file": "internal/config/config_test.go",
+  "test_command": "go test ./...",
+  "related_test": "",
+  "recommendation": "テストの実行を推奨します"
+}

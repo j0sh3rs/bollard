@@ -21,6 +21,12 @@ func TestLoad_RequiredFieldsMissing(t *testing.T) {
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("UNIFI_HOST", "https://unifi.local")
 	t.Setenv("UNIFI_API_KEY", "test-key")
+	t.Setenv("UNIFI_SITE", "")
+	t.Setenv("UNIFI_SKIP_TLS_VERIFY", "")
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("RECONCILE_INTERVAL", "")
+	t.Setenv("LOG_FORMAT", "")
+	t.Setenv("LOG_LEVEL", "")
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
