@@ -36,7 +36,7 @@ func main() {
 	}
 	slog.SetDefault(logger)
 
-	db, err := store.NewSQLite(cfg.DatabaseURL)
+	db, err := store.NewStore(cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("state store unavailable", "err", err)
 		os.Exit(1)
