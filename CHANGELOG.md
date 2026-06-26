@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/j0sh3rs/bollard/compare/v0.2.2...v0.3.0) (2026-06-26)
+
+
+### Features
+
+* add PostgreSQL store backend with migrations and tests ([607f233](https://github.com/j0sh3rs/bollard/commit/607f2337f20df09104e439915177e750860f030a))
+
 ## [0.2.2](https://github.com/j0sh3rs/bollard/compare/v0.2.1...v0.2.2) (2026-06-26)
 
 
