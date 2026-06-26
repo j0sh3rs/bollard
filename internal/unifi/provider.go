@@ -141,12 +141,13 @@ func (p *legacyProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unifi: legacy list: %w", err)
 	}
-	var resp staticDNSResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	// Legacy endpoint returns a raw JSON array, not an envelope.
+	var entries []staticDNSEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, fmt.Errorf("unifi: parse legacy records: %w", err)
 	}
 	var records []DNSRecord
-	for _, e := range resp.Data {
+	for _, e := range entries {
 		if !e.Enabled || e.RecordType != "A" {
 			continue
 		}
@@ -168,14 +169,15 @@ func (p *legacyProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 	if err != nil {
 		return "", fmt.Errorf("unifi: legacy create: %w", err)
 	}
-	var resp staticDNSResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	// Legacy endpoint returns the created entry as a single JSON object.
+	var created staticDNSEntry
+	if err := json.Unmarshal(data, &created); err != nil {
 		return "", fmt.Errorf("unifi: parse legacy create response: %w", err)
 	}
-	if len(resp.Data) == 0 {
-		return "", fmt.Errorf("unifi: legacy create returned empty response")
+	if created.ID == "" {
+		return "", fmt.Errorf("unifi: legacy create returned no id")
 	}
-	return resp.Data[0].ID, nil
+	return created.ID, nil
 }
 
 func (p *legacyProvider) DeleteRecord(ctx context.Context, unifiID string) error {

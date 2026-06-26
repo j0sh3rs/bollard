@@ -69,13 +69,6 @@ type staticDNSEntry struct {
 	Enabled    bool   `json:"enabled"`
 }
 
-type staticDNSResponse struct {
-	Data []staticDNSEntry `json:"data"`
-	Meta struct {
-		RC string `json:"rc"`
-	} `json:"meta"`
-}
-
 type apiErrorResponse struct {
 	StatusCode int    `json:"statusCode"`
 	StatusName string `json:"statusName"`

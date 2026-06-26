@@ -141,15 +141,13 @@ func TestListRecords_Legacy(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/proxy/network/v2/api/site/default/static-dns":
-			json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{
-					{"_id": "leg-1", "key": "legacy.home.arpa", "value": "10.0.0.5",
-						"record_type": "A", "ttl": 120, "enabled": true},
-					// disabled record — should be filtered
-					{"_id": "leg-2", "key": "old.home.arpa", "value": "10.0.0.6",
-						"record_type": "A", "ttl": 300, "enabled": false},
-				},
-				"meta": map[string]any{"rc": "ok"},
+			// Real legacy API returns a raw JSON array.
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"_id": "leg-1", "key": "legacy.home.arpa", "value": "10.0.0.5",
+					"record_type": "A", "ttl": 120, "enabled": true},
+				// disabled record — should be filtered
+				{"_id": "leg-2", "key": "old.home.arpa", "value": "10.0.0.6",
+					"record_type": "A", "ttl": 300, "enabled": false},
 			})
 		default:
 			// modern probe fails → legacy fallback
@@ -179,12 +177,10 @@ func TestCreateRecord_Legacy(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/proxy/network/v2/api/site/default/static-dns" && r.Method == http.MethodPost:
+			// Real legacy API returns a single object, not an envelope.
 			json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{
-					{"_id": "leg-new", "key": "new.home.arpa", "value": "10.0.0.99",
-						"record_type": "A", "ttl": 300, "enabled": true},
-				},
-				"meta": map[string]any{"rc": "ok"},
+				"_id": "leg-new", "key": "new.home.arpa", "value": "10.0.0.99",
+				"record_type": "A", "ttl": 300, "enabled": true,
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
