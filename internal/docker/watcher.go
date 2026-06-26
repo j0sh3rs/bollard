@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"strings"
 
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -12,6 +13,7 @@ import (
 type Event struct {
 	Type        string // "start" or "stop"
 	ContainerID string
+	Name        string // container name (without leading slash)
 	Labels      map[string]string
 }
 
@@ -63,7 +65,11 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan Event, <-chan error) {
 				if !ok {
 					return
 				}
-				e := Event{ContainerID: msg.Actor.ID, Labels: msg.Actor.Attributes}
+				e := Event{
+					ContainerID: msg.Actor.ID,
+					Name:        strings.TrimPrefix(msg.Actor.Attributes["name"], "/"),
+					Labels:      msg.Actor.Attributes,
+				}
 				switch msg.Action {
 				case "start":
 					e.Type = "start"
@@ -86,4 +92,17 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan Event, <-chan error) {
 // Close shuts down the Docker client.
 func (w *Watcher) Close() error {
 	return w.client.Close()
+}
+
+// Ref returns a human-readable container reference: "name(short-id)".
+// Falls back to the short ID if Name is empty.
+func (e Event) Ref() string {
+	short := e.ContainerID
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	if e.Name == "" {
+		return short
+	}
+	return e.Name + "(" + short + ")"
 }

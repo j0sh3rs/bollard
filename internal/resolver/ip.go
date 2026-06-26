@@ -3,10 +3,11 @@ package resolver
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // HostIP returns override if non-empty. Otherwise infers the host's
-// primary non-loopback unicast IPv4 address. Returns an error if
+// primary non-loopback, non-Docker unicast IPv4 address. Returns an error if
 // inference finds no suitable address or finds more than one routable
 // candidate (use dns.bollard/ip-override in that case).
 func HostIP(override string) (string, error) {
@@ -28,18 +29,31 @@ func inferHostIP() (string, error) {
 	return SelectCandidate(candidates)
 }
 
-// selectHostIP extracts IPv4 addresses from interface list for testability.
-// Errors from inaccessible interfaces are silently ignored to allow best-effort
-// enumeration in environments where some interfaces may not be accessible.
+// isDockerInterface reports whether the interface name looks like a
+// Docker-managed virtual interface. These are excluded from IP inference
+// to avoid picking a bridge/VLAN IP instead of the physical NIC address.
+func isDockerInterface(name string) bool {
+	for _, prefix := range []string{"docker", "br-", "veth", "virbr", "flannel", "cni", "tunl", "weave"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectHostIP extracts IPv4 addresses from non-virtual interfaces.
+// Errors from inaccessible interfaces are silently skipped.
 func selectHostIP(ifaces []net.Interface) ([]string, error) {
 	var candidates []string
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
+		if isDockerInterface(iface.Name) {
+			continue
+		}
 		addrs, err := iface.Addrs()
 		if err != nil {
-			// Silently skip interfaces that are inaccessible (e.g., in restricted namespaces)
 			continue
 		}
 		for _, addr := range addrs {
@@ -58,8 +72,6 @@ func selectHostIP(ifaces []net.Interface) ([]string, error) {
 			}
 		}
 	}
-	// Return warnings but don't fail — partial enumeration is acceptable.
-	// This allows the function to work even if some interfaces are inaccessible.
 	return candidates, nil
 }
 

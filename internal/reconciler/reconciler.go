@@ -69,7 +69,7 @@ func (r *Reconciler) HandleEvent(ctx context.Context, e docker.Event) error {
 func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 	spec, err := docker.ParseLabels(e.Labels)
 	if err != nil {
-		r.log.Warn("invalid labels on container", "container", e.ContainerID, "err", err)
+		r.log.Warn("invalid labels on container", "container", e.Ref(), "err", err)
 		return nil
 	}
 	if spec == nil || !spec.Enabled {
@@ -94,7 +94,7 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
 		}
-		return fmt.Errorf("reconciler: resolve IP: %w", err)
+		return fmt.Errorf("reconciler: resolve IP for %s (%s): %w", spec.Hostname, e.Ref(), err)
 	}
 
 	unifiID, err := r.provider.CreateRecord(ctx, unifi.DNSRecord{
@@ -104,7 +104,7 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
 		}
-		return fmt.Errorf("reconciler: create unifi record: %w", err)
+		return fmt.Errorf("reconciler: create record %s for %s: %w", spec.Hostname, e.Ref(), err)
 	}
 
 	now := time.Now().UTC()
@@ -123,13 +123,13 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
 		}
-		return fmt.Errorf("reconciler: write store: %w", err)
+		return fmt.Errorf("reconciler: write store for %s: %w", spec.Hostname, err)
 	}
 
 	if r.metrics != nil {
 		r.metrics.RecordsTotal.WithLabelValues("created", "true").Inc()
 	}
-	r.log.Info("created DNS record", "hostname", spec.Hostname, "ip", ip, "container", e.ContainerID)
+	r.log.Info("created DNS record", "hostname", spec.Hostname, "ip", ip, "container", e.Ref())
 	return nil
 }
 
@@ -148,13 +148,13 @@ func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("deleted", "false").Inc()
 		}
-		r.log.Error("failed to delete unifi record", "unifi_id", rec.UnifiRecordID, "err", err)
-		return fmt.Errorf("reconciler: delete unifi record: %w", err)
+		r.log.Error("failed to delete unifi record", "hostname", rec.Hostname, "container", e.Ref(), "unifi_id", rec.UnifiRecordID, "err", err)
+		return fmt.Errorf("reconciler: delete record %s for %s: %w", rec.Hostname, e.Ref(), err)
 	}
 	if r.metrics != nil {
 		r.metrics.RecordsTotal.WithLabelValues("deleted", "true").Inc()
 	}
-	r.log.Info("deleted DNS record", "hostname", rec.Hostname, "container", e.ContainerID)
+	r.log.Info("deleted DNS record", "hostname", rec.Hostname, "container", e.Ref())
 	return nil
 }
 

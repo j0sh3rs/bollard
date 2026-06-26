@@ -152,7 +152,7 @@ func main() {
 			m.DockerEventsTotal.WithLabelValues(e.Type).Inc()
 			if err := rec.HandleEvent(ctx, e); err != nil {
 				m.DockerEventErrorsTotal.WithLabelValues("handle").Inc()
-				logger.Error("handle event failed", "container", e.ContainerID, "err", err)
+				logger.Error("handle event failed", "container", e.Ref(), "err", err)
 			}
 		case <-ticker.C:
 			start := time.Now()
