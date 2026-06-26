@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/j0sh3rs/bollard/compare/v0.3.0...v0.4.0) (2026-06-26)
+
+
+### Features
+
+* **dep:** Bump all deps to latest ([f0a1c7f](https://github.com/j0sh3rs/bollard/commit/f0a1c7f440bf3590720c85810d514479cca3b001))
+* expose Prometheus metrics and /healthz endpoint ([9cd1ba2](https://github.com/j0sh3rs/bollard/commit/9cd1ba2a2fba590579f42d00b63fab6cd8c8c93f))
+
+
+### Documentation
+
+* add comprehensive monitoring reference with alerting rules and examples ([c35d965](https://github.com/j0sh3rs/bollard/commit/c35d965cc1b1304a16a6441b3435edd1105dfa8a))
+
 ## [0.3.0](https://github.com/j0sh3rs/bollard/compare/v0.2.2...v0.3.0) (2026-06-26)
 
 
