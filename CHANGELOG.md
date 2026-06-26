@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0](https://github.com/j0sh3rs/bollard/compare/v0.4.0...v0.5.0) (2026-06-26)
+
+
+### Features
+
+* add --healthcheck flag and Dockerfile HEALTHCHECK directive ([d1f905d](https://github.com/j0sh3rs/bollard/commit/d1f905d8410df3496f9b689de40d28ca9f28b2c7))
+
+
+### Bug Fixes
+
+* remove USER 65534 — breaks volume writes on host-mounted paths ([183614d](https://github.com/j0sh3rs/bollard/commit/183614d8ad4ee59eeb115c21242543deb5814bd6))
+
+
+### Documentation
+
+* add roadmap with phased feature backlog and open questions ([31889a9](https://github.com/j0sh3rs/bollard/commit/31889a9641f57ed5b7abbaa424ad5f6e75b03dc3))
+
 ## [0.4.0](https://github.com/j0sh3rs/bollard/compare/v0.3.0...v0.4.0) (2026-06-26)
 
 
