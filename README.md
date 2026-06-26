@@ -183,4 +183,6 @@ For full metric descriptions, PromQL examples, alerting rules, and Grafana panel
 - [Configuration reference](docs/configuration.md) — all env vars and labels documented
 - [Operations guide](docs/operations.md) — day-to-day operation, --adopt, backup, upgrade
 - [Architecture](docs/architecture.md) — internal design, component diagram, event flow
+- [Monitoring](docs/monitoring.md) — Prometheus metrics reference, alerting rules, Grafana panels
 - [Examples](docs/examples/) — ready-to-use compose files for common setups
+- [Roadmap](docs/ROADMAP.md) — planned features and open questions
