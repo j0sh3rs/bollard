@@ -1,0 +1,39 @@
+# bollard with a private CA certificate for TLS verification.
+#
+# Use when your UniFi controller presents a certificate signed by an
+# internal CA (corporate PKI, self-signed root, etc.) and you want
+# proper TLS verification instead of skipping it.
+#
+# Steps:
+#   1. Export your CA certificate in PEM format
+#   2. Place it at a path accessible on the NAS, e.g. /volume1/docker/bollard/ca.pem
+#   3. Set UNIFI_SKIP_TLS_VERIFY=false in your .env
+#   4. Do NOT set UNIFI_CA_CERT in .env — set it in the environment block below
+#      so the path is the container-internal path, not the host path.
+#
+# Required .env file:
+#   UNIFI_HOST=https://unifi.home.arpa
+#   UNIFI_API_KEY=your-api-key-here
+#   DATABASE_URL=file:/data/bollard.db
+#   UNIFI_SKIP_TLS_VERIFY=false
+
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+      # Mount your CA cert into the container.
+      # Left side: host path to the PEM file.
+      # Right side: container path — must match UNIFI_CA_CERT below.
+      - /volume1/docker/bollard/ca.pem:/etc/bollard/ca.pem:ro
+    env_file: .env
+    environment:
+      # Points to the container-internal path of the mounted cert.
+      # When UNIFI_CA_CERT is set, UNIFI_SKIP_TLS_VERIFY is ignored.
+      UNIFI_CA_CERT: /etc/bollard/ca.pem
+
+volumes:
+  bollard-data:

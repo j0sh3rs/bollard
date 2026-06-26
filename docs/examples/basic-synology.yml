@@ -1,0 +1,31 @@
+# Minimal bollard setup for Synology DSM.
+#
+# Required .env file (create alongside this file):
+#   UNIFI_HOST=https://unifi.home.arpa
+#   UNIFI_API_KEY=your-api-key-here
+#   DATABASE_URL=file:/data/bollard.db
+#
+# Start: docker compose up -d
+
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    env_file: .env
+
+  # Example app — label opts it into DNS management.
+  # bollard creates: nginx.home.arpa → <NAS host IP>
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    labels:
+      dns.bollard/hostname: nginx.home.arpa
+
+volumes:
+  bollard-data:

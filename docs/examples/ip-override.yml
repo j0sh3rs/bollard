@@ -1,0 +1,54 @@
+# ip-override: register a container at a specific IP instead of the host IP.
+#
+# When to use:
+#   - Container is on a macvlan network and has its own routable IP
+#   - Container is on a bridge network with a port-mapped service reachable
+#     at a different IP (e.g. a secondary NAS interface or a virtual IP)
+#   - You want the DNS record to point to a load balancer or reverse proxy
+#     IP rather than the NAS host IP
+#
+# When NOT to use:
+#   - Containers on host networking (default Synology pattern) — bollard
+#     infers the correct host IP automatically
+#
+# Required .env file:
+#   UNIFI_HOST=https://unifi.home.arpa
+#   UNIFI_API_KEY=your-api-key-here
+#   DATABASE_URL=file:/data/bollard.db
+
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    env_file: .env
+
+  # Container on a macvlan network with its own IP (192.168.10.50).
+  # Without ip-override, bollard would use the NAS host IP.
+  # With ip-override, the A record points to the container's macvlan IP.
+  myapp:
+    image: nginx:alpine
+    restart: unless-stopped
+    networks:
+      macvlan-net:
+        ipv4_address: 192.168.10.50
+    labels:
+      dns.bollard/hostname: myapp.home.arpa
+      dns.bollard/ip-override: "192.168.10.50"
+
+networks:
+  macvlan-net:
+    driver: macvlan
+    driver_opts:
+      parent: eth0          # NAS physical interface
+    ipam:
+      config:
+        - subnet: 192.168.10.0/24
+          gateway: 192.168.10.1
+          ip_range: 192.168.10.48/29   # .49-.54 reserved for containers
+
+volumes:
+  bollard-data:

@@ -1,0 +1,57 @@
+# Multi-stack setup: one bollard instance serves all stacks on the host.
+#
+# bollard watches ALL containers on the Docker socket, not just containers
+# in its own compose stack. You only need one bollard instance per host
+# regardless of how many stacks you run.
+#
+# Layout:
+#   /volume1/docker/bollard/docker-compose.yml   ← this file (bollard only)
+#   /volume1/docker/app1/docker-compose.yml      ← app stack 1 (separate file)
+#   /volume1/docker/app2/docker-compose.yml      ← app stack 2 (separate file)
+#
+# Both app stacks use dns.bollard/hostname labels as normal. bollard picks
+# up their containers via the shared Docker socket.
+#
+# Required .env file (in /volume1/docker/bollard/):
+#   UNIFI_HOST=https://unifi.home.arpa
+#   UNIFI_API_KEY=your-api-key-here
+#   DATABASE_URL=file:/data/bollard.db
+
+# --- /volume1/docker/bollard/docker-compose.yml ---
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    env_file: .env
+
+volumes:
+  bollard-data:
+
+---
+# --- /volume1/docker/app1/docker-compose.yml ---
+# Start separately: cd /volume1/docker/app1 && docker compose up -d
+services:
+  whoami:
+    image: traefik/whoami
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    labels:
+      dns.bollard/hostname: whoami.home.arpa
+      dns.bollard/ttl: "60"
+
+---
+# --- /volume1/docker/app2/docker-compose.yml ---
+# Start separately: cd /volume1/docker/app2 && docker compose up -d
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    labels:
+      dns.bollard/hostname: homepage.home.arpa
