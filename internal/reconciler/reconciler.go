@@ -39,6 +39,9 @@ func (r *Reconciler) resolvedIP(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
+	if r.hostIP != "" {
+		return r.hostIP, nil
+	}
 	r.resolveOnce.Do(func() {
 		r.hostIP, r.resolveErr = resolver.HostIP("")
 	})
