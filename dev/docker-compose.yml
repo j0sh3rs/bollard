@@ -1,0 +1,40 @@
+---
+# Local development compose — builds bollard from source.
+# Copy dev/.env.example to dev/.env and fill in your UniFi credentials.
+# Usage:
+#   docker compose -f dev/docker-compose.yml up --build
+#
+# To trigger a DNS record create/delete cycle:
+#   docker compose -f dev/docker-compose.yml --profile test up test-app
+#   docker compose -f dev/docker-compose.yml --profile test stop test-app
+
+services:
+  bollard:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: "no"
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-dev-data:/data
+    env_file: .env
+    environment:
+      DATABASE_URL: file:/data/bollard.db
+      LOG_LEVEL: debug
+      LOG_FORMAT: logfmt
+      RECONCILE_INTERVAL: 30s
+
+  # Bring this up/down to trigger bollard create/delete events.
+  # Set dns.bollard/hostname to a name valid in your UniFi domain.
+  test-app:
+    image: nginx:alpine
+    restart: "no"
+    labels:
+      dns.bollard/hostname: "bollard-test.home.arpa"
+      dns.bollard/ttl: "60"
+    profiles:
+      - test
+
+volumes:
+  bollard-dev-data:
