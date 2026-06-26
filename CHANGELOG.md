@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/j0sh3rs/bollard/compare/v0.2.0...v0.2.1) (2026-06-26)
+
+
+### Chores
+
+* harden Dockerfile and release pipeline with SBOM, provenance, signing ([1458149](https://github.com/j0sh3rs/bollard/commit/1458149559d294d99503c3d17357d9bc4fb6b517))
+
 ## [0.2.0](https://github.com/j0sh3rs/bollard/compare/v0.1.0...v0.2.0) (2026-06-26)
 
 
