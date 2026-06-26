@@ -5,9 +5,11 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -133,6 +135,32 @@ func main() {
 	defer ticker.Stop()
 
 	m.Up.Set(1)
+
+	// Startup banner — build info.
+	logger.Info("bollard starting",
+		"version", version,
+		"go", runtime.Version(),
+		"os", runtime.GOOS,
+		"arch", runtime.GOARCH,
+	)
+
+	// Config synopsis — no credentials.
+	logger.Info("configuration",
+		"unifi_host", cfg.UnifiHost,
+		"unifi_site", cfg.UnifiSite,
+		"unifi_tls_verify", !cfg.UnifiSkipTLSVerify,
+		"database", sanitizeDSN(cfg.DatabaseURL),
+		"reconcile_interval", cfg.ReconcileInterval,
+		"metrics_addr", cfg.MetricsAddr,
+		"log_format", cfg.LogFormat,
+		"log_level", cfg.LogLevel,
+	)
+
+	// State store synopsis.
+	if existing, err := db.ListAll(context.Background()); err == nil {
+		logger.Info("state store ready", "owned_records", len(existing))
+	}
+
 	logger.Info("bollard started", "reconcile_interval", cfg.ReconcileInterval)
 
 	for {
@@ -185,4 +213,21 @@ func (d *dockerLister) ListRunning(ctx context.Context) (map[string]map[string]s
 		result[ctr.ID] = ctr.Labels
 	}
 	return result, nil
+}
+
+// sanitizeDSN strips credentials from a DSN for safe logging.
+// Postgres URIs have the form postgres://user:pass@host/db — the password
+// is replaced with "***". SQLite file paths are returned unchanged.
+func sanitizeDSN(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return dsn
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "<unparseable dsn>"
+	}
+	if u.User != nil {
+		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	return u.String()
 }
