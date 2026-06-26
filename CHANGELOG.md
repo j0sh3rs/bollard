@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/j0sh3rs/bollard/compare/v0.5.2...v0.6.0) (2026-06-26)
+
+
+### Features
+
+* emit startup banner with build info, config synopsis, and store record count ([d7f39a3](https://github.com/j0sh3rs/bollard/commit/d7f39a31880f34cf041ec36a03f2315a0ce17b01))
+
 ## [0.5.2](https://github.com/j0sh3rs/bollard/compare/v0.5.1...v0.5.2) (2026-06-26)
 
 
