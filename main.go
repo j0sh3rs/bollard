@@ -28,7 +28,20 @@ var version = "dev"
 
 func main() {
 	adopt := flag.Bool("adopt", false, "adopt existing UniFi records before starting normal operation")
+	healthcheck := flag.Bool("healthcheck", false, "check /healthz and exit 0 (healthy) or 1 (unhealthy)")
 	flag.Parse()
+
+	if *healthcheck {
+		addr := os.Getenv("METRICS_ADDR")
+		if addr == "" {
+			addr = ":9090"
+		}
+		resp, err := http.Get("http://localhost" + addr + "/healthz") //nolint:noctx
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
