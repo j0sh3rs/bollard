@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.2](https://github.com/j0sh3rs/bollard/compare/v0.2.1...v0.2.2) (2026-06-26)
+
+
+### Documentation
+
+* add comprehensive documentation and examples ([14fe926](https://github.com/j0sh3rs/bollard/commit/14fe926cd440e5b6b76b6843a795e3ca7e006d10))
+
+
+### Chores
+
+* add renovate config with weekly binpacking and automerge ([f99e2d9](https://github.com/j0sh3rs/bollard/commit/f99e2d98b67b38f7e86f962d1b61c50988f01fe6))
+
 ## [0.2.1](https://github.com/j0sh3rs/bollard/compare/v0.2.0...v0.2.1) (2026-06-26)
 
 
