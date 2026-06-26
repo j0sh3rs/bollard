@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1](https://github.com/j0sh3rs/bollard/compare/v0.5.0...v0.5.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* legacy UniFi API returns raw array and single object, not envelope ([043781e](https://github.com/j0sh3rs/bollard/commit/043781ef0030ced06db416b627e34d0f42c4df51))
+
+
+### Chores
+
+* add ip-override to dev test-app label for multi-NIC hosts ([62781a8](https://github.com/j0sh3rs/bollard/commit/62781a8725c54f6b539fcd576e78c0d1f4152fff))
+* add local dev compose with labeled test container and env example ([e595987](https://github.com/j0sh3rs/bollard/commit/e5959870f2c5a24747eeac180c7ea793745c2359))
+
 ## [0.5.0](https://github.com/j0sh3rs/bollard/compare/v0.4.0...v0.5.0) (2026-06-26)
 
 
