@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/j0sh3rs/bollard/compare/v0.5.1...v0.5.2) (2026-06-26)
+
+
+### Bug Fixes
+
+* filter Docker bridge interfaces from IP inference, log container name with short ID and hostname on failures ([8e8433f](https://github.com/j0sh3rs/bollard/commit/8e8433fa1a24960cf217ed7069e65580da1176c6))
+
 ## [0.5.1](https://github.com/j0sh3rs/bollard/compare/v0.5.0...v0.5.1) (2026-06-26)
 
 
