@@ -33,6 +33,9 @@ services:
     labels:
       dns.bollard/hostname: "bollard-test.home.arpa"
       dns.bollard/ttl: "60"
+      # Required on Mac/multi-NIC hosts where IP inference is ambiguous.
+      # Set to the IP you want the DNS record to point at.
+      dns.bollard/ip-override: "192.168.1.1"
     profiles:
       - test
 
