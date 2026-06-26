@@ -1,0 +1,81 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "group:allNonMajor"
+  ],
+  "schedule": ["before 6am on monday"],
+  "timezone": "UTC",
+  "automerge": true,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "platformAutomerge": true,
+  "labels": ["dependencies"],
+  "commitMessagePrefix": "chore(deps):",
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 0,
+  "packageRules": [
+    {
+      "description": "Batch all non-major updates weekly",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "groupName": "all dependencies",
+      "groupSlug": "all-deps",
+      "schedule": ["before 6am on monday"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Major updates: open PR but require manual merge",
+      "matchUpdateTypes": ["major"],
+      "groupName": "major updates",
+      "automerge": false,
+      "labels": ["dependencies", "major-upgrade"]
+    },
+    {
+      "description": "Go module direct dependencies",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["require"],
+      "commitMessageTopic": "go module {{depName}}"
+    },
+    {
+      "description": "Pin Docker base image digests",
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true,
+      "automerge": true,
+      "groupName": "docker digests",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "GitHub Actions non-major: batch weekly",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "github actions",
+      "automerge": true,
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "GitHub Actions major: manual review",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major-upgrade"]
+    },
+    {
+      "description": "Go toolchain directive: manual review",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["golang"],
+      "automerge": false,
+      "labels": ["dependencies", "go-toolchain"]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["at any time"],
+    "labels": ["security"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "dependencyDashboardAutoclose": true
+}
