@@ -170,6 +170,21 @@ Minimum log level to emit. `debug` includes detailed reconcile loop output and U
 
 ---
 
+### `METRICS_ADDR`
+
+- **Required:** no
+- **Default:** `:9090`
+- **Type:** host:port string
+
+Address for Prometheus `/metrics` and `/healthz` endpoints.
+
+```bash
+METRICS_ADDR=:9090           # default — all interfaces, port 9090
+METRICS_ADDR=127.0.0.1:9090  # loopback only
+```
+
+---
+
 ## Container labels
 
 Labels are set on individual containers to control DNS registration.

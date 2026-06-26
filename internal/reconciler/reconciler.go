@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/j0sh3rs/bollard/internal/docker"
+	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/resolver"
 	"github.com/j0sh3rs/bollard/internal/store"
 	"github.com/j0sh3rs/bollard/internal/unifi"
@@ -27,12 +28,14 @@ type Reconciler struct {
 	hostIP      string
 	resolveOnce sync.Once
 	resolveErr  error
+	metrics     *metrics.Metrics
 	log         *slog.Logger
 }
 
 // New creates a Reconciler. hostIP may be empty (inferred on first use).
-func New(s store.Store, p unifi.DNSProvider, lister ContainerLister, hostIP string, log *slog.Logger) *Reconciler {
-	return &Reconciler{store: s, provider: p, lister: lister, hostIP: hostIP, log: log}
+// m may be nil; all metric calls are no-ops when nil.
+func New(s store.Store, p unifi.DNSProvider, lister ContainerLister, hostIP string, m *metrics.Metrics, log *slog.Logger) *Reconciler {
+	return &Reconciler{store: s, provider: p, lister: lister, hostIP: hostIP, metrics: m, log: log}
 }
 
 func (r *Reconciler) resolvedIP(override string) (string, error) {
@@ -79,12 +82,18 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 	}
 	for _, rec := range all {
 		if rec.Hostname == spec.Hostname {
+			if r.metrics != nil {
+				r.metrics.HostnameConflictsTotal.Inc()
+			}
 			return fmt.Errorf("reconciler: hostname %q already owned by container %s", spec.Hostname, rec.ContainerID)
 		}
 	}
 
 	ip, err := r.resolvedIP(spec.IPOverride)
 	if err != nil {
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
+		}
 		return fmt.Errorf("reconciler: resolve IP: %w", err)
 	}
 
@@ -92,6 +101,9 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		Hostname: spec.Hostname, IP: ip, RecordType: spec.RecordType, TTL: spec.TTL,
 	})
 	if err != nil {
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
+		}
 		return fmt.Errorf("reconciler: create unifi record: %w", err)
 	}
 
@@ -108,9 +120,15 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		UpdatedAt:     now,
 	}); err != nil {
 		_ = r.provider.DeleteRecord(ctx, unifiID)
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
+		}
 		return fmt.Errorf("reconciler: write store: %w", err)
 	}
 
+	if r.metrics != nil {
+		r.metrics.RecordsTotal.WithLabelValues("created", "true").Inc()
+	}
 	r.log.Info("created DNS record", "hostname", spec.Hostname, "ip", ip, "container", e.ContainerID)
 	return nil
 }
@@ -118,14 +136,23 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 	rec, err := r.store.DeleteByContainerID(ctx, e.ContainerID)
 	if err != nil {
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("deleted", "false").Inc()
+		}
 		return fmt.Errorf("reconciler: delete from store: %w", err)
 	}
 	if rec == nil {
 		return nil
 	}
 	if err := r.provider.DeleteRecord(ctx, rec.UnifiRecordID); err != nil {
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("deleted", "false").Inc()
+		}
 		r.log.Error("failed to delete unifi record", "unifi_id", rec.UnifiRecordID, "err", err)
 		return fmt.Errorf("reconciler: delete unifi record: %w", err)
+	}
+	if r.metrics != nil {
+		r.metrics.RecordsTotal.WithLabelValues("deleted", "true").Inc()
 	}
 	r.log.Info("deleted DNS record", "hostname", rec.Hostname, "container", e.ContainerID)
 	return nil
@@ -156,6 +183,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			r.log.Warn("orphaned store record, cleaning up",
 				"hostname", sr.Hostname, "unifi_id", sr.UnifiRecordID)
 			_ = r.store.Delete(ctx, sr.ID)
+			if r.metrics != nil {
+				r.metrics.OrphansCleanedTotal.Inc()
+			}
 		}
 	}
 
@@ -185,6 +215,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			Type: "start", ContainerID: containerID, Labels: labels,
 		}); err != nil {
 			r.log.Error("reconcile: missed-event recovery failed", "container", containerID, "err", err)
+		} else {
+			if r.metrics != nil {
+				r.metrics.MissedRecoveredTotal.Inc()
+			}
 		}
 	}
 	return nil
@@ -229,6 +263,9 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 			}); err != nil {
 				r.log.Error("adopt: store create failed", "container", containerID, "err", err)
 				continue
+			}
+			if r.metrics != nil {
+				r.metrics.RecordsTotal.WithLabelValues("adopted", "true").Inc()
 			}
 			r.log.Info("adopted existing unifi record", "hostname", spec.Hostname, "container", containerID)
 		} else {

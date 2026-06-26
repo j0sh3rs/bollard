@@ -20,6 +20,7 @@ type Config struct {
 	ReconcileInterval  time.Duration `env:"RECONCILE_INTERVAL"    envDefault:"5m"`
 	LogFormat          string        `env:"LOG_FORMAT"            envDefault:"logfmt"`
 	LogLevel           string        `env:"LOG_LEVEL"             envDefault:"info"`
+	MetricsAddr        string        `env:"METRICS_ADDR"          envDefault:":9090"`
 }
 
 func Load() (*Config, error) {

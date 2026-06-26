@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -14,10 +16,15 @@ import (
 	"github.com/j0sh3rs/bollard/internal/config"
 	dockerwatcher "github.com/j0sh3rs/bollard/internal/docker"
 	bollardlog "github.com/j0sh3rs/bollard/internal/log"
+	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/reconciler"
 	"github.com/j0sh3rs/bollard/internal/store"
 	"github.com/j0sh3rs/bollard/internal/unifi"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// version is set via ldflags at build time.
+var version = "dev"
 
 func main() {
 	adopt := flag.Bool("adopt", false, "adopt existing UniFi records before starting normal operation")
@@ -35,6 +42,9 @@ func main() {
 		os.Exit(1)
 	}
 	slog.SetDefault(logger)
+
+	m := metrics.New(version, runtime.Version())
+	m.Up.Set(0)
 
 	db, err := store.NewStore(cfg.DatabaseURL)
 	if err != nil {
@@ -73,7 +83,20 @@ func main() {
 	defer listerClient.Close()
 
 	lister := &dockerLister{client: listerClient}
-	rec := reconciler.New(db, provider, lister, "", logger)
+	rec := reconciler.New(db, provider, lister, "", m, logger)
+
+	// Start metrics HTTP server.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		logger.Info("metrics server listening", "addr", cfg.MetricsAddr)
+		if err := http.ListenAndServe(cfg.MetricsAddr, mux); err != nil {
+			logger.Error("metrics server failed", "err", err)
+		}
+	}()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -96,6 +119,7 @@ func main() {
 	ticker := time.NewTicker(cfg.ReconcileInterval)
 	defer ticker.Stop()
 
+	m.Up.Set(1)
 	logger.Info("bollard started", "reconcile_interval", cfg.ReconcileInterval)
 
 	for {
@@ -112,12 +136,23 @@ func main() {
 			if !ok {
 				return
 			}
+			m.DockerEventsTotal.WithLabelValues(e.Type).Inc()
 			if err := rec.HandleEvent(ctx, e); err != nil {
+				m.DockerEventErrorsTotal.WithLabelValues("handle").Inc()
 				logger.Error("handle event failed", "container", e.ContainerID, "err", err)
 			}
 		case <-ticker.C:
+			start := time.Now()
 			if err := rec.Reconcile(ctx); err != nil {
+				m.ReconcileIterationsTotal.WithLabelValues("failure").Inc()
 				logger.Error("reconcile failed", "err", err)
+			} else {
+				m.ReconcileIterationsTotal.WithLabelValues("success").Inc()
+				m.ReconcileDuration.Observe(time.Since(start).Seconds())
+				m.ReconcileLastTimestamp.Set(float64(time.Now().Unix()))
+			}
+			if recs, err := db.ListAll(ctx); err == nil {
+				m.RecordsActive.Set(float64(len(recs)))
 			}
 		}
 	}

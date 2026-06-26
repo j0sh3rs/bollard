@@ -102,6 +102,7 @@ bollard will create an A record pointing `myapp.home.arpa` at the NAS host IP wh
 | `RECONCILE_INTERVAL` | `5m` | How often the reconcile loop runs |
 | `LOG_FORMAT` | `logfmt` | `logfmt` or `json` |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `METRICS_ADDR` | `:9090` | Address for Prometheus `/metrics` and `/healthz` endpoints |
 
 ## UniFi credential setup
 
@@ -135,6 +136,25 @@ bollard scans running containers, matches existing UniFi records by hostname + I
 | State database unavailable | Fatal — bollard exits. Fix the `DATABASE_URL` and restart. |
 | Docker socket unavailable | Fatal — bollard exits. |
 | Duplicate hostname across two containers | Second container left unregistered, error logged. |
+
+## Metrics
+
+bollard exposes Prometheus metrics at `http://<host>:<METRICS_ADDR>/metrics` (default `:9090`).
+
+Key metrics:
+
+| Metric | Type | Description |
+|---|---|---|
+| `bollard_records_total` | Counter | DNS records created/deleted/adopted (labels: `action`, `success`) |
+| `bollard_records_active` | Gauge | Currently owned DNS records |
+| `bollard_reconcile_last_timestamp_seconds` | Gauge | Unix timestamp of last completed reconcile |
+| `bollard_reconcile_iterations_total` | Counter | Reconcile loop runs (label: `status`) |
+| `bollard_reconcile_duration_seconds` | Histogram | Reconcile loop duration |
+| `bollard_unifi_requests_total` | Counter | UniFi API calls (labels: `method`, `status`) |
+| `bollard_docker_events_total` | Counter | Docker events received (label: `type`) |
+| `bollard_up` | Gauge | 1 when bollard is running normally |
+
+A `/healthz` endpoint returns HTTP 200 for liveness probes.
 
 ## Known limitations
 
