@@ -1,0 +1,56 @@
+services:
+  bollard:
+    image: ghcr.io/j0sh3rs/bollard:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - bollard-data:/data
+    environment:
+      UNIFI_HOST: ${UNIFI_HOST}          # e.g. https://unifi.home.arpa
+      UNIFI_API_KEY: ${UNIFI_API_KEY}
+      UNIFI_SITE: ${UNIFI_SITE:-default}
+      UNIFI_SKIP_TLS_VERIFY: ${UNIFI_SKIP_TLS_VERIFY:-true}
+      DATABASE_URL: file:/data/bollard.db
+      RECONCILE_INTERVAL: 5m
+      LOG_FORMAT: logfmt
+      LOG_LEVEL: info
+      METRICS_ADDR: :9090
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=:9099
+      - --config.file=/dev/stdin
+    # Inline scrape config via stdin — no mounted file needed.
+    # prometheus scrapes bollard on the same host network at localhost:9090.
+    stdin_open: true
+    tty: false
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat <<'EOF' > /tmp/prometheus.yml
+        global:
+          scrape_interval: 30s
+          evaluation_interval: 30s
+
+        scrape_configs:
+          - job_name: bollard
+            static_configs:
+              - targets: ["localhost:9090"]
+        EOF
+        exec /bin/prometheus \
+          --config.file=/tmp/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --web.listen-address=:9099
+
+volumes:
+  bollard-data:
+  prometheus-data:

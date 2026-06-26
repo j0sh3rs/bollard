@@ -182,6 +182,45 @@ With bollard running, you can also read the file with `.dump`:
 sqlite3 /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db ".dump records"
 ```
 
+## Monitoring
+
+### Verify metrics are being scraped
+
+```bash
+curl -s localhost:9090/metrics | grep bollard_up
+```
+
+Expected output:
+
+```
+# HELP bollard_up 1 when bollard is running normally, 0 otherwise.
+# TYPE bollard_up gauge
+bollard_up 1
+```
+
+### Check last reconcile time
+
+```bash
+curl -s localhost:9090/metrics | grep bollard_reconcile_last_timestamp
+```
+
+The value is a Unix epoch timestamp. To compute seconds since last reconcile:
+
+```bash
+last=$(curl -s localhost:9090/metrics | awk '/^bollard_reconcile_last_timestamp_seconds / {print $2}')
+echo "seconds since last reconcile: $(($(date +%s) - ${last%.*}))"
+```
+
+### Check if bollard is healthy
+
+```bash
+curl -sf localhost:9090/healthz && echo "healthy"
+```
+
+Returns `healthy` with exit code 0 when bollard is running. Non-zero exit or no output indicates bollard is down or the metrics server is not reachable.
+
+For full alerting rules and Grafana panel specs see [docs/monitoring.md](monitoring.md).
+
 ## Manually cleaning up orphaned records
 
 If bollard is offline and you need to remove DNS records it created:

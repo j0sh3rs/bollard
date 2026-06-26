@@ -141,20 +141,35 @@ bollard scans running containers, matches existing UniFi records by hostname + I
 
 bollard exposes Prometheus metrics at `http://<host>:<METRICS_ADDR>/metrics` (default `:9090`).
 
-Key metrics:
+```bash
+curl localhost:9090/metrics | grep bollard_up
+```
 
-| Metric | Type | Description |
-|---|---|---|
-| `bollard_records_total` | Counter | DNS records created/deleted/adopted (labels: `action`, `success`) |
-| `bollard_records_active` | Gauge | Currently owned DNS records |
-| `bollard_reconcile_last_timestamp_seconds` | Gauge | Unix timestamp of last completed reconcile |
-| `bollard_reconcile_iterations_total` | Counter | Reconcile loop runs (label: `status`) |
-| `bollard_reconcile_duration_seconds` | Histogram | Reconcile loop duration |
-| `bollard_unifi_requests_total` | Counter | UniFi API calls (labels: `method`, `status`) |
-| `bollard_docker_events_total` | Counter | Docker events received (label: `type`) |
-| `bollard_up` | Gauge | 1 when bollard is running normally |
+A `/healthz` endpoint returns HTTP 200 for use as a liveness probe:
 
-A `/healthz` endpoint returns HTTP 200 for liveness probes.
+```bash
+curl -sf localhost:9090/healthz && echo "healthy"
+```
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `bollard_records_total` | Counter | `action` (created/deleted/adopted), `success` (true/false) | DNS record lifecycle operations |
+| `bollard_records_active` | Gauge | — | Currently owned DNS records in state store |
+| `bollard_record_hostname_conflicts_total` | Counter | — | Duplicate hostname registration attempts |
+| `bollard_reconcile_orphans_cleaned_total` | Counter | — | Orphaned state rows cleaned by reconcile |
+| `bollard_reconcile_missed_recovered_total` | Counter | — | Missed-event recoveries during reconcile |
+| `bollard_reconcile_iterations_total` | Counter | `status` (success/failure) | Reconcile loop runs |
+| `bollard_reconcile_duration_seconds` | Histogram | — | Reconcile loop duration |
+| `bollard_reconcile_last_timestamp_seconds` | Gauge | — | Unix epoch of last successful reconcile |
+| `bollard_docker_events_total` | Counter | `type` (start/stop) | Docker container events received |
+| `bollard_docker_event_errors_total` | Counter | `stage` (handle) | Docker event handling errors |
+| `bollard_unifi_requests_total` | Counter | `method` (GET/POST/DELETE), `status` (2xx/4xx/5xx/error) | UniFi API calls |
+| `bollard_unifi_request_duration_seconds` | Histogram | `method` | UniFi API request latency |
+| `bollard_unifi_api_version` | Gauge | `provider` (modern/legacy) | Active UniFi API provider (value=1) |
+| `bollard_build_info` | Gauge | `version`, `goversion` | Build metadata (always 1) |
+| `bollard_up` | Gauge | — | 1 when running, 0 on shutdown |
+
+For full metric descriptions, PromQL examples, alerting rules, and Grafana panel specs see [docs/monitoring.md](docs/monitoring.md).
 
 ## Known limitations
 
