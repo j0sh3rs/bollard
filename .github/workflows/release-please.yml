@@ -9,6 +9,7 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
+  id-token: write  # required for OIDC keyless signing and SLSA provenance
 
 jobs:
   release-please:
@@ -31,10 +32,25 @@ jobs:
       - name: Build release binaries
         if: ${{ steps.release.outputs.release_created }}
         run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" \
-            -o bollard-linux-amd64 .
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" \
-            -o bollard-linux-arm64 .
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w" -o bollard-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-s -w" -o bollard-linux-arm64 .
+
+      - name: Generate SHA256 checksums
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          sha256sum bollard-linux-amd64 bollard-linux-arm64 \
+            > CHECKSUMS.sha256
+
+      - name: Generate SBOM for binaries
+        if: ${{ steps.release.outputs.release_created }}
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom
 
       - name: Upload release artifacts
         if: ${{ steps.release.outputs.release_created }}
@@ -43,7 +59,9 @@ jobs:
         run: |
           gh release upload ${{ steps.release.outputs.tag_name }} \
             bollard-linux-amd64 \
-            bollard-linux-arm64
+            bollard-linux-arm64 \
+            CHECKSUMS.sha256 \
+            sbom.spdx.json
 
       - name: Set up Docker Buildx
         if: ${{ steps.release.outputs.release_created }}
@@ -59,12 +77,29 @@ jobs:
 
       - name: Build and push Docker image
         if: ${{ steps.release.outputs.release_created }}
+        id: build
         uses: docker/build-push-action@v6
+        env:
+          TAG: ghcr.io/${{ github.repository }}
+          VER: ${{ steps.release.outputs.tag_name }}
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: true
+          sbom: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{
-              steps.release.outputs.tag_name }}
-            ghcr.io/${{ github.repository }}:latest
+            ${{ env.TAG }}:${{ env.VER }}
+            ${{ env.TAG }}:latest
+
+      - name: Install Cosign
+        if: ${{ steps.release.outputs.release_created }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Docker image
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          TAG: ghcr.io/${{ github.repository }}
+          VER: ${{ steps.release.outputs.tag_name }}
+          DIG: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$TAG:$VER@$DIG"

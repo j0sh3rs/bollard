@@ -4,12 +4,14 @@
   "packages": {
     ".": {
       "release-type": "go",
+      "include-v-in-tag": true,
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },
         { "type": "perf", "section": "Performance Improvements" },
         { "type": "deps", "section": "Dependencies" },
-        { "type": "docs", "section": "Documentation" }
+        { "type": "docs", "section": "Documentation" },
+        { "type": "chore", "section": "Chores" }
       ]
     }
   }
