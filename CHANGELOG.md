@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.1](https://github.com/j0sh3rs/bollard/compare/v0.6.0...v0.6.1) (2026-10-12)
+
+
+### Chores
+
+* **deps:** Update all dependencies ([#16](https://github.com/j0sh3rs/bollard/issues/16)) ([acb3f5b](https://github.com/j0sh3rs/bollard/commit/acb3f5bce8561f85453840f77b8e6f749cb5deac))
+* **deps:** Update golang Docker tag to v1.27 ([#17](https://github.com/j0sh3rs/bollard/issues/17)) ([3c02929](https://github.com/j0sh3rs/bollard/commit/3c02929b873f9bfe99f17b5595b7ae327d7bba17))
+* **deps:** Update module go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp to v1.45.0 [SECURITY] ([#12](https://github.com/j0sh3rs/bollard/issues/12)) ([e28254d](https://github.com/j0sh3rs/bollard/commit/e28254d8827e7288f76f4645d5e73ed2601bb341))
+* **deps:** Update module golang.org/x/text to v0.41.0 [SECURITY] ([#13](https://github.com/j0sh3rs/bollard/issues/13)) ([4df74cc](https://github.com/j0sh3rs/bollard/commit/4df74ccdeecdbaefd3888d03a07ac9d73e9a0e1f))
+
 ## [0.6.0](https://github.com/j0sh3rs/bollard/compare/v0.5.2...v0.6.0) (2026-06-26)
 
 
