@@ -2,7 +2,7 @@ module github.com/j0sh3rs/bollard
 
 go 1.26.0
 
-require github.com/caarlos0/env/v11 v11.4.1
+require github.com/caarlos0/env/v11 v11.4.2
 
 require (
 	github.com/docker/docker v28.5.2+incompatible
@@ -11,7 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/lmittmann/tint v1.2.1
 	github.com/prometheus/client_golang v1.25.0
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.62.0
 )
 
 require (
@@ -56,7 +56,7 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	gotest.tools/v3 v3.5.2 // indirect
-	modernc.org/libc v1.79.0 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
