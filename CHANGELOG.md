@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.1](https://github.com/j0sh3rs/bollard/compare/v0.6.0...v0.6.1) (2026-11-14)
+
+
+### Chores
+
+* **deps:** Update all dependencies ([#16](https://github.com/j0sh3rs/bollard/issues/16)) ([acb3f5b](https://github.com/j0sh3rs/bollard/commit/acb3f5bce8561f85453840f77b8e6f749cb5deac))
+* **deps:** Update all dependencies ([#22](https://github.com/j0sh3rs/bollard/issues/22)) ([024c89c](https://github.com/j0sh3rs/bollard/commit/024c89c604bd2363a700e30ba3785c56056968d6))
+* **deps:** Update all dependencies ([#24](https://github.com/j0sh3rs/bollard/issues/24)) ([e22158a](https://github.com/j0sh3rs/bollard/commit/e22158a353e438c9eb776e0d06c0426b66df2dba))
+* **deps:** Update go module modernc.org/sqlite to v1.61.0 ([#20](https://github.com/j0sh3rs/bollard/issues/20)) ([5d487ec](https://github.com/j0sh3rs/bollard/commit/5d487ecaccfda2641021f268d74c884094192212))
+* **deps:** Update golang Docker tag to v1.27 ([#17](https://github.com/j0sh3rs/bollard/issues/17)) ([3c02929](https://github.com/j0sh3rs/bollard/commit/3c02929b873f9bfe99f17b5595b7ae327d7bba17))
+* **deps:** Update golang:1.27-alpine Docker digest to b8c9b82 ([#19](https://github.com/j0sh3rs/bollard/issues/19)) ([c84cc1b](https://github.com/j0sh3rs/bollard/commit/c84cc1b781b5a0253bf16acc8a1da8b2486fbe47))
+* **deps:** Update golang:1.27-alpine Docker digest to d200d2d ([#21](https://github.com/j0sh3rs/bollard/issues/21)) ([0d5b87b](https://github.com/j0sh3rs/bollard/commit/0d5b87b66dcf81b02ca7598ffe3638ed4dc235cc))
+* **deps:** Update golang:1.27-alpine Docker digest to fa3d596 ([#23](https://github.com/j0sh3rs/bollard/issues/23)) ([d7e02de](https://github.com/j0sh3rs/bollard/commit/d7e02dee2d5f37658a5e46d11e1c608ca868fc6b))
+* **deps:** Update module go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp to v1.45.0 [SECURITY] ([#12](https://github.com/j0sh3rs/bollard/issues/12)) ([e28254d](https://github.com/j0sh3rs/bollard/commit/e28254d8827e7288f76f4645d5e73ed2601bb341))
+* **deps:** Update module go.opentelemetry.io/otel/trace to v1.47.0 [SECURITY] ([#25](https://github.com/j0sh3rs/bollard/issues/25)) ([9bb2500](https://github.com/j0sh3rs/bollard/commit/9bb2500419a21c72df927b0dab65a0a94739ec14))
+* **deps:** Update module golang.org/x/text to v0.41.0 [SECURITY] ([#13](https://github.com/j0sh3rs/bollard/issues/13)) ([4df74cc](https://github.com/j0sh3rs/bollard/commit/4df74ccdeecdbaefd3888d03a07ac9d73e9a0e1f))
+
 ## [0.6.0](https://github.com/j0sh3rs/bollard/compare/v0.5.2...v0.6.0) (2026-06-26)
 
 
