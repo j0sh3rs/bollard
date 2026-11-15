@@ -140,7 +140,7 @@ providers:
 		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}
 	args = append(args, image, "--configFile=/etc/traefik/traefik.yml")
-	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if err != nil {
 		t.Fatalf("start Traefik: %v\n%s", err, out)
 	}
