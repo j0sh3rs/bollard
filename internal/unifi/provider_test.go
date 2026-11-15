@@ -3,10 +3,13 @@ package unifi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/j0sh3rs/bollard/internal/unifi"
 )
@@ -32,7 +35,7 @@ func TestNew_ModernAPIDetection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -64,7 +67,7 @@ func TestListRecords_Modern(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -100,7 +103,7 @@ func TestCreateAndDeleteRecord_Modern(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -127,7 +130,7 @@ func TestNew_LegacyFallback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New with legacy fallback: %v", err)
 	}
@@ -156,7 +159,7 @@ func TestListRecords_Legacy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -188,7 +191,7 @@ func TestCreateRecord_Legacy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -215,7 +218,7 @@ func TestDeleteRecord_Legacy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -240,7 +243,7 @@ func TestDeleteRecord_404Tolerant(t *testing.T) {
 	}))
 	defer srvModern.Close()
 
-	provider, err := unifi.New(newTestConfig(srvModern.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srvModern.URL))
 	if err != nil {
 		t.Fatalf("New modern: %v", err)
 	}
@@ -254,7 +257,7 @@ func TestDeleteRecord_404Tolerant(t *testing.T) {
 	}))
 	defer srvLegacy.Close()
 
-	legacyProvider, err := unifi.New(newTestConfig(srvLegacy.URL))
+	legacyProvider, err := unifi.New(context.Background(), newTestConfig(srvLegacy.URL))
 	if err != nil {
 		t.Fatalf("New legacy: %v", err)
 	}
@@ -293,7 +296,7 @@ func TestRetry_429AlwaysRetried(t *testing.T) {
 	cfg := newTestConfig(srv.URL)
 	cfg.RetryAttempts = 3
 	cfg.RetryInitialDelay = 1 // 1ns to keep test fast
-	provider, err := unifi.New(cfg)
+	provider, err := unifi.New(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -323,7 +326,7 @@ func TestAPIKeyHeader(t *testing.T) {
 
 	cfg := newTestConfig(srv.URL)
 	cfg.APIKey = "my-secret-api-key"
-	if _, err := unifi.New(cfg); err != nil {
+	if _, err := unifi.New(context.Background(), cfg); err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if gotKey != "my-secret-api-key" {
@@ -347,7 +350,7 @@ func TestSiteByID(t *testing.T) {
 
 	cfg := newTestConfig(srv.URL)
 	cfg.Site = "abc-123" // match by ID, not name
-	provider, err := unifi.New(cfg)
+	provider, err := unifi.New(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("New with site ID: %v", err)
 	}
@@ -376,7 +379,7 @@ func TestAPIError_StructuredResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider, err := unifi.New(newTestConfig(srv.URL))
+	provider, err := unifi.New(context.Background(), newTestConfig(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -418,7 +421,7 @@ func TestRetry_5xxGetRetried(t *testing.T) {
 	cfg := newTestConfig(srv.URL)
 	cfg.RetryAttempts = 3
 	cfg.RetryInitialDelay = 2_000_000 // 2ms
-	provider, err := unifi.New(cfg)
+	provider, err := unifi.New(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -428,5 +431,176 @@ func TestRetry_5xxGetRetried(t *testing.T) {
 	}
 	if len(records) != 0 {
 		t.Errorf("expected 0 records, got %d", len(records))
+	}
+}
+
+func TestNew_ProbeCancellation(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := unifi.New(ctx, newTestConfig(srv.URL))
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("probe did not stop after cancellation")
+	}
+}
+
+func TestNew_ProbeFailuresDoNotFallBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"unauthorized", 401, `{}`},
+		{"forbidden", 403, `{}`},
+		{"server failure", 500, `{}`},
+		{"malformed JSON", 200, `{"data":`},
+		{"site missing", 200, `{"data":[{"id":"other","name":"other"}]}`},
+		{"empty remaining page", 200, `{"data":[],"count":1,"totalCount":2}`},
+		{"negative total", 200, `{"data":[],"totalCount":-1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			cfg := newTestConfig(srv.URL)
+			cfg.RetryAttempts = 1
+			if p, err := unifi.New(context.Background(), cfg); err == nil || p != nil {
+				t.Fatalf("expected probe failure without provider, got %T, %v", p, err)
+			}
+		})
+	}
+}
+
+func TestNew_UnsupportedProbeFallsBack(t *testing.T) {
+	for _, status := range []int{404, 405, 501} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+			cfg := newTestConfig(srv.URL)
+			cfg.RetryInitialDelay = time.Nanosecond
+			if p, err := unifi.New(context.Background(), cfg); err != nil || p == nil {
+				t.Fatalf("expected legacy provider, got %T, %v", p, err)
+			}
+		})
+	}
+}
+
+func TestNew_RejectsRedirects(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}]}`)
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	if _, err := unifi.New(context.Background(), newTestConfig(srv.URL)); err == nil {
+		t.Fatal("expected redirect rejection")
+	}
+	if redirected.Load() != 0 {
+		t.Fatal("redirect target received request and API key")
+	}
+}
+
+func TestNew_SiteOnSecondPage(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch r.URL.Query().Get("offset") {
+		case "0":
+			fmt.Fprint(w, `{"data":[{"id":"other","name":"other"}],"count":200,"totalCount":2}`)
+		case "1":
+			fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}],"count":1,"totalCount":2}`)
+		default:
+			t.Errorf("unexpected offset %q", r.URL.Query().Get("offset"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	if _, err := unifi.New(context.Background(), newTestConfig(srv.URL)); err != nil {
+		t.Fatalf("resolve second-page site: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected two pages, got %d", calls.Load())
+	}
+}
+
+func TestListRecords_Pagination(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secondPage string
+		wantError  bool
+	}{
+		{"count does not skip records", `{"data":[{"id":"two","type":"A_RECORD","enabled":true}],"count":1,"totalCount":2}`, false},
+		{"empty remaining page", `{"data":[],"count":1,"totalCount":2}`, true},
+		{"negative total", `{"data":[],"totalCount":-1}`, true},
+		{"negative count", `{"data":[],"count":-1,"totalCount":2}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/proxy/network/integration/v1/sites" {
+					fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}]}`)
+					return
+				}
+				switch r.URL.Query().Get("offset") {
+				case "0":
+					fmt.Fprint(w, `{"data":[{"id":"one","type":"A_RECORD","enabled":true}],"count":200,"totalCount":2}`)
+				case "1":
+					fmt.Fprint(w, tc.secondPage)
+				default:
+					t.Errorf("unexpected offset %q", r.URL.Query().Get("offset"))
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer srv.Close()
+			p, err := unifi.New(context.Background(), newTestConfig(srv.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			records, err := p.ListRecords(context.Background())
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected malformed pagination error")
+				}
+				return
+			}
+			if err != nil || len(records) != 2 || records[1].ID != "two" {
+				t.Fatalf("expected both records, got %+v, %v", records, err)
+			}
+		})
+	}
+}
+
+func TestNew_TransportFailureDoesNotFallBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+	if p, err := unifi.New(context.Background(), newTestConfig(srv.URL)); err == nil || p != nil {
+		t.Fatalf("expected transport failure without provider, got %T, %v", p, err)
 	}
 }

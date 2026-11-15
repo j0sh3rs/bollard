@@ -3,6 +3,7 @@ package unifi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -14,42 +15,62 @@ type DNSProvider interface {
 	DeleteRecord(ctx context.Context, unifiID string) error
 }
 
+var errModernUnsupported = errors.New("unifi: modern API unsupported")
+
 // New probes the UniFi controller and returns the appropriate DNSProvider.
-// Tries modern Integration API first; falls back to legacy static-DNS.
-func New(cfg *Config) (DNSProvider, error) {
+// Only an unsupported modern endpoint falls back to legacy static-DNS.
+func New(ctx context.Context, cfg *Config) (DNSProvider, error) {
 	cfg.setDefaults()
 	t, err := newHTTPTransport(cfg)
 	if err != nil {
 		return nil, err
 	}
-	siteID, err := resolveSiteID(context.Background(), t, cfg)
+	siteID, err := resolveSiteID(ctx, t, cfg)
 	if err == nil {
 		return &modernProvider{transport: t, cfg: cfg, siteID: siteID}, nil
+	}
+	if err != errModernUnsupported {
+		return nil, err
 	}
 	return &legacyProvider{transport: t, cfg: cfg}, nil
 }
 
 func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, error) {
-	url := fmt.Sprintf("%s/proxy/network/integration/v1/sites", cfg.Host)
-	data, status, err := t.do(ctx, http.MethodGet, url, nil)
-	if err != nil || status >= 400 {
-		return "", fmt.Errorf("unifi: site probe failed (status=%d): %w", status, err)
-	}
-	var resp struct {
-		Data []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("unifi: parse sites: %w", err)
-	}
-	for _, site := range resp.Data {
-		if site.Name == cfg.Site || site.ID == cfg.Site {
-			return site.ID, nil
+	const pageLimit = 200
+	offset := 0
+	for {
+		url := fmt.Sprintf("%s/proxy/network/integration/v1/sites?offset=%d&limit=%d", cfg.Host, offset, pageLimit)
+		data, status, err := t.do(ctx, http.MethodGet, url, nil)
+		if offset == 0 && (status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented) {
+			return "", errModernUnsupported
+		}
+		if err != nil {
+			return "", fmt.Errorf("unifi: site probe failed (status=%d): %w", status, err)
+		}
+		var page struct {
+			Count      int `json:"count"`
+			TotalCount int `json:"totalCount"`
+			Data       []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return "", fmt.Errorf("unifi: parse sites: %w", err)
+		}
+		if page.Count < 0 || page.TotalCount < 0 || (len(page.Data) == 0 && offset < page.TotalCount) {
+			return "", fmt.Errorf("unifi: invalid sites pagination at offset %d", offset)
+		}
+		for _, site := range page.Data {
+			if site.Name == cfg.Site || site.ID == cfg.Site {
+				return site.ID, nil
+			}
+		}
+		offset += len(page.Data)
+		if offset >= page.TotalCount {
+			return "", fmt.Errorf("unifi: site %q not found", cfg.Site)
 		}
 	}
-	return "", fmt.Errorf("unifi: site %q not found", cfg.Site)
 }
 
 type modernProvider struct {
@@ -72,9 +93,12 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unifi: list records: %w", err)
 		}
-		var page apiPage[dnsPolicyEnvelope]
+		var page dnsPolicyPage
 		if err := json.Unmarshal(data, &page); err != nil {
 			return nil, fmt.Errorf("unifi: parse records: %w", err)
+		}
+		if page.Count < 0 || page.TotalCount < 0 || (len(page.Data) == 0 && offset < page.TotalCount) {
+			return nil, fmt.Errorf("unifi: invalid records pagination at offset %d", offset)
 		}
 		for _, env := range page.Data {
 			if !env.Enabled || env.Type != policyTypeA {
@@ -89,10 +113,10 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 				RecordType: "A", TTL: ttl,
 			})
 		}
-		if offset+page.Count >= page.TotalCount {
+		offset += len(page.Data)
+		if offset >= page.TotalCount {
 			break
 		}
-		offset += page.Count
 	}
 	return all, nil
 }

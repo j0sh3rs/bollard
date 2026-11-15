@@ -1,0 +1,12 @@
+displayName: Bollard UniFi DNS
+type: provider
+import: github.com/j0sh3rs/bollard/traefik
+summary: Create UniFi A records from Traefik HTTP router Host rules.
+testData:
+  traefikAPI: http://127.0.0.1:1
+  unifiHost: http://127.0.0.1:1
+  unifiAPIKey: catalog-test-key
+  unifiSite: default
+  unifiSkipTLSVerify: false
+  address: 192.0.2.10
+  pollInterval: 30s

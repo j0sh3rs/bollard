@@ -5,10 +5,13 @@
 
 Docker label-driven DNS controller for UniFi Network controllers. Watches Docker container events and creates/deletes A records automatically — no manual static-DNS editing required.
 
+Alternatively, the [Traefik provider plugin](docs/traefik-plugin.md) discovers HTTP router `Host()` names and creates UniFi A records pointing at your Traefik IPv4 address. It runs inside Traefik, requires no Docker socket or database, and never updates or deletes DNS records.
+
 ## Table of contents
 
 - [How it works](#how-it-works)
 - [Quickstart](#quickstart)
+- [Traefik provider plugin](docs/traefik-plugin.md)
 - [Label reference](#label-reference)
 - [Environment variables](#environment-variables)
 - [UniFi credential setup](#unifi-credential-setup)
@@ -130,7 +133,7 @@ bollard scans running containers, matches existing UniFi records by hostname + I
 
 | Failure | Behavior |
 |---|---|
-| UniFi unreachable at startup | Retries with exponential backoff. Does not crash. |
+| UniFi unreachable at startup | Startup fails after the bounded API probe. Restart the controller after restoring connectivity. |
 | UniFi write fails | Logged. Reconcile loop retries on next tick. |
 | Container dies without a stop event | Reconcile loop cleans up the orphaned record within one interval. |
 | State database unavailable | Fatal — bollard exits. Fix the `DATABASE_URL` and restart. |
@@ -180,6 +183,7 @@ For full metric descriptions, PromQL examples, alerting rules, and Grafana panel
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — step-by-step setup for Synology NAS operators
+- [Traefik provider plugin](docs/traefik-plugin.md) — secure deployment, automatic router discovery, and plugin publishing
 - [Configuration reference](docs/configuration.md) — all env vars and labels documented
 - [Operations guide](docs/operations.md) — day-to-day operation, --adopt, backup, upgrade
 - [Architecture](docs/architecture.md) — internal design, component diagram, event flow

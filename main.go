@@ -68,7 +68,10 @@ func main() {
 	}
 	defer db.Close()
 
-	provider, err := unifi.New(&unifi.Config{
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	provider, err := unifi.New(ctx, &unifi.Config{
 		Host:          cfg.UnifiHost,
 		APIKey:        cfg.UnifiAPIKey,
 		Site:          cfg.UnifiSite,
@@ -112,9 +115,6 @@ func main() {
 			logger.Error("metrics server failed", "err", err)
 		}
 	}()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	if *adopt {
 		logger.Info("starting adopt phase")

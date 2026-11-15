@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand/v2"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -40,11 +40,17 @@ func newHTTPTransport(cfg *Config) (*httpTransport, error) {
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec
 	}
 	return &httpTransport{
-		client: &http.Client{Transport: &http.Transport{
-			TLSClientConfig:     tlsCfg,
-			MaxConnsPerHost:     10,
-			MaxIdleConnsPerHost: 5,
-		}},
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Transport: &http.Transport{
+				TLSClientConfig:     tlsCfg,
+				MaxConnsPerHost:     10,
+				MaxIdleConnsPerHost: 5,
+			},
+		},
 		apiKey: cfg.APIKey,
 		cfg:    cfg,
 	}, nil
@@ -52,6 +58,7 @@ func newHTTPTransport(cfg *Config) (*httpTransport, error) {
 
 func (t *httpTransport) do(ctx context.Context, method, url string, body []byte) ([]byte, int, error) {
 	var lastErr error
+	var lastStatus int
 	for attempt := 0; attempt < t.cfg.RetryAttempts; attempt++ {
 		if attempt > 0 {
 			wait := t.backoff(attempt)
@@ -66,11 +73,12 @@ func (t *httpTransport) do(ctx context.Context, method, url string, body []byte)
 			return data, status, nil
 		}
 		lastErr = err
+		lastStatus = status
 		if !t.shouldRetry(method, status, err) {
 			return nil, status, err
 		}
 	}
-	return nil, 0, lastErr
+	return nil, lastStatus, lastErr
 }
 
 func (t *httpTransport) doOnce(ctx context.Context, method, url string, body []byte) ([]byte, int, error) {
@@ -95,7 +103,7 @@ func (t *httpTransport) doOnce(ctx context.Context, method, url string, body []b
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("unifi: read body: %w", err)
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		var apiErr apiErrorResponse
 		if jsonErr := json.Unmarshal(data, &apiErr); jsonErr == nil && apiErr.Message != "" {
 			return nil, resp.StatusCode, &apiErr
@@ -124,7 +132,7 @@ func (t *httpTransport) backoff(attempt int) time.Duration {
 	exp := time.Duration(math.Pow(2, float64(attempt-1))) * base
 	var jitter time.Duration
 	if half := int64(base / 2); half > 0 {
-		jitter = time.Duration(rand.Int64N(half))
+		jitter = time.Duration(rand.Int63n(half))
 	}
 	wait := exp + jitter
 	if wait > t.cfg.RetryMaxDelay {

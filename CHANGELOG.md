@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* add a Traefik provider plugin that discovers HTTP router Host rules and creates missing UniFi A records without updating or deleting existing records
+
 ## [0.6.1](https://github.com/j0sh3rs/bollard/compare/v0.6.0...v0.6.1) (2026-11-15)
 
 

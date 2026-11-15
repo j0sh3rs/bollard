@@ -53,10 +53,10 @@ type dnsPolicyEnvelope struct {
 
 const policyTypeA = "A_RECORD"
 
-type apiPage[T any] struct {
-	Count      int `json:"count"`
-	TotalCount int `json:"totalCount"`
-	Data       []T `json:"data"`
+type dnsPolicyPage struct {
+	Count      int                 `json:"count"`
+	TotalCount int                 `json:"totalCount"`
+	Data       []dnsPolicyEnvelope `json:"data"`
 }
 
 // Legacy static-DNS wire types.
