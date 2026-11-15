@@ -6,6 +6,18 @@
 
 * add a Traefik provider plugin that discovers HTTP router Host rules and creates missing UniFi A records without updating or deleting existing records
 
+## [0.7.0](https://github.com/j0sh3rs/bollard/compare/v0.6.1...v0.7.0) (2026-11-15)
+
+
+### Features
+
+* add Traefik UniFi DNS provider plugin ([9e01dd1](https://github.com/j0sh3rs/bollard/commit/9e01dd1d57e0159a54fdae590dafa6eb3d4c7150))
+
+
+### Bug Fixes
+
+* isolate Docker container ID from image pull logs ([4b0cb96](https://github.com/j0sh3rs/bollard/commit/4b0cb96ed77b4c6c5d2b02240d9fc5dceb88be62))
+
 ## [0.6.1](https://github.com/j0sh3rs/bollard/compare/v0.6.0...v0.6.1) (2026-11-15)
 
 
