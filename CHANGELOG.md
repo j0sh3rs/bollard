@@ -11,6 +11,13 @@
 
 * cover Docker pull stderr, repeated reconciliation, missing-record recovery, router removal, partial write failures, and target-IP conflicts
 
+## [0.7.2](https://github.com/j0sh3rs/bollard/compare/v0.7.1...v0.7.2) (2026-11-16)
+
+
+### Chores
+
+* **deps:** Update golang:1.27-alpine Docker digest to 70bd7dd ([#30](https://github.com/j0sh3rs/bollard/issues/30)) ([99b2fbf](https://github.com/j0sh3rs/bollard/commit/99b2fbf4e70477ab2b6f9e9bbe6a5aa01b421fe5))
+
 ## [0.7.1](https://github.com/j0sh3rs/bollard/compare/v0.7.0...v0.7.1) (2026-11-16)
 
 
