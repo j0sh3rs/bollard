@@ -11,6 +11,13 @@
 
 * cover Docker pull stderr, repeated reconciliation, missing-record recovery, router removal, partial write failures, and target-IP conflicts
 
+## [0.7.1](https://github.com/j0sh3rs/bollard/compare/v0.7.0...v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* harden plugin collision handling, site resolution, docs and examples ([e8b163a](https://github.com/j0sh3rs/bollard/commit/e8b163afe2d90bd197b3c7f03750a58cc61a0dd9))
+
 ## [0.7.0](https://github.com/j0sh3rs/bollard/compare/v0.6.1...v0.7.0) (2026-11-15)
 
 
