@@ -104,6 +104,7 @@ func New(ctx context.Context, config *Config, name string) (*Provider, error) {
 		unifiConfig: &unifi.Config{
 			Host: host, APIKey: key, Site: site,
 			CACertPath: config.UnifiCACert, SkipTLSVerify: config.UnifiSkipTLSVerify,
+			IncludeAllRecords: true,
 		},
 		client: &http.Client{
 			Timeout: 15 * time.Second,
@@ -187,13 +188,12 @@ func (p *Provider) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list UniFi records: %w", err)
 	}
-	existing := make(map[string]bool, len(records))
 	for _, record := range records {
 		host := strings.ToLower(strings.TrimSuffix(record.Hostname, "."))
-		existing[host] = true
 		if hosts[host] && record.IP != p.address {
 			p.logger.Printf("DNS conflict for %s: existing record preserved", host)
 		}
+		delete(hosts, host)
 	}
 	ordered := make([]string, 0, len(hosts))
 	for host := range hosts {
@@ -201,9 +201,6 @@ func (p *Provider) reconcile(ctx context.Context) error {
 	}
 	sort.Strings(ordered)
 	for _, host := range ordered {
-		if existing[host] {
-			continue
-		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

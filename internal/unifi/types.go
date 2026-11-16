@@ -24,6 +24,9 @@ type Config struct {
 	RetryAttempts     int
 	RetryInitialDelay time.Duration
 	RetryMaxDelay     time.Duration
+	// IncludeAllRecords lists every named policy (disabled and non-A included)
+	// so callers can detect occupied names. Default lists enabled A records only.
+	IncludeAllRecords bool
 }
 
 func (c *Config) setDefaults() {

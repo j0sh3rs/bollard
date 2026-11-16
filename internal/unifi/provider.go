@@ -51,8 +51,9 @@ func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, 
 			Count      int `json:"count"`
 			TotalCount int `json:"totalCount"`
 			Data       []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID                string `json:"id"`
+				Name              string `json:"name"`
+				InternalReference string `json:"internalReference"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(data, &page); err != nil {
@@ -62,7 +63,7 @@ func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, 
 			return "", fmt.Errorf("unifi: invalid sites pagination at offset %d", offset)
 		}
 		for _, site := range page.Data {
-			if site.Name == cfg.Site || site.ID == cfg.Site {
+			if cfg.Site != "" && (site.Name == cfg.Site || site.ID == cfg.Site || site.InternalReference == cfg.Site) {
 				return site.ID, nil
 			}
 		}
@@ -101,16 +102,20 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 			return nil, fmt.Errorf("unifi: invalid records pagination at offset %d", offset)
 		}
 		for _, env := range page.Data {
-			if !env.Enabled || env.Type != policyTypeA {
+			if !p.cfg.IncludeAllRecords && (!env.Enabled || env.Type != policyTypeA) {
 				continue
 			}
 			ttl := 0
 			if env.TTLSeconds != nil {
 				ttl = *env.TTLSeconds
 			}
+			recordType := env.Type
+			if env.Type == policyTypeA {
+				recordType = "A"
+			}
 			all = append(all, DNSRecord{
 				ID: env.ID, Hostname: env.Domain, IP: env.IPv4Address,
-				RecordType: "A", TTL: ttl,
+				RecordType: recordType, TTL: ttl,
 			})
 		}
 		offset += len(page.Data)
@@ -172,11 +177,11 @@ func (p *legacyProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 	}
 	var records []DNSRecord
 	for _, e := range entries {
-		if !e.Enabled || e.RecordType != "A" {
+		if !p.cfg.IncludeAllRecords && (!e.Enabled || e.RecordType != "A") {
 			continue
 		}
 		records = append(records, DNSRecord{
-			ID: e.ID, Hostname: e.Key, IP: e.Value, RecordType: "A", TTL: e.TTL,
+			ID: e.ID, Hostname: e.Key, IP: e.Value, RecordType: e.RecordType, TTL: e.TTL,
 		})
 	}
 	return records, nil

@@ -1,0 +1,15 @@
+# Overlay: verify the controller against a private CA (PEM file on the Docker host).
+#   UNIFI_CA_FILE=./secrets/unifi_ca.pem docker compose -f compose.yaml -f compose.custom-ca.yaml up -d
+# Compose refuses to start if UNIFI_CA_FILE is unset, so no placeholder path can sneak in.
+services:
+  render:
+    environment:
+      UNIFI_CA_CERT: /run/secrets/unifi_ca.pem
+  traefik:
+    secrets:
+      - source: unifi_ca
+        target: unifi_ca.pem
+
+secrets:
+  unifi_ca:
+    file: ${UNIFI_CA_FILE:?set UNIFI_CA_FILE to the CA PEM path on the host}

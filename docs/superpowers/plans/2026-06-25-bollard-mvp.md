@@ -1,5 +1,7 @@
 # bollard MVP Implementation Plan
 
+> **Historical document (June 2026).** Written before implementation; Postgres, metrics, and other details have since changed. For current behaviour see [Architecture](../../architecture.md) and [Configuration](../../configuration.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a Docker event-driven DNS controller that creates/deletes A records in a UniFi Network controller from container labels, with SQLite ownership tracking and a self-healing reconcile loop.

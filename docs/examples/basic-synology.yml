@@ -5,6 +5,9 @@
 #   UNIFI_API_KEY=your-api-key-here
 #   DATABASE_URL=file:/data/bollard.db
 #
+# UNIFI_SKIP_TLS_VERIFY defaults to true (no certificate checks). Set it to
+# false, or use docs/examples/custom-ca.yml, once the setup works.
+#
 # Start: docker compose up -d
 
 services:

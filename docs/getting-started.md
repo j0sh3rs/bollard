@@ -1,55 +1,48 @@
 # Getting started
 
-Step-by-step setup for a Synology NAS operator.
+Tutorial: run the **standalone bollard daemon** on a Docker host (written for a Synology NAS), register one container in UniFi DNS, and confirm it. About 15 minutes.
+
+Not sure this is the right mode? bollard has two:
+
+| | Standalone daemon (this tutorial) | [Traefik provider plugin](traefik-plugin.md) |
+|---|---|---|
+| Use when | You label plain Docker containers | You already run Traefik and want DNS from router `Host()` rules |
+| Needs Docker socket | yes, read-only | no |
+| Keeps state | yes (SQLite/Postgres) | no |
+| Deletes DNS records | yes, ones it owns | never |
 
 ## Prerequisites
 
-- Docker Engine running on the NAS (Container Manager or standalone Docker)
-- Access to your UniFi Network controller (self-hosted or Cloud Key)
-- An account with Super Admin or Network Admin rights to create additional admin accounts
+- Docker Engine with Compose on the host.
+- A UniFi Network controller reachable from the host, with API-key support.
+- A UniFi account that may create API keys and manage DNS.
+- The host has **one** routable IPv4 address on a non-Docker interface. If it has several (multiple NICs, VLANs), you will need `dns.bollard/ip-override` in step 4; see [IP resolution](architecture.md#ip-resolution).
 
-## 1. Create a bollard service account in UniFi
+## 1. Create a UniFi API key
 
-UniFi has no DNS-only role. bollard needs a local Network Admin account.
+Use a dedicated local account rather than your primary or SSO admin, so a leaked key has limited reach.
 
-1. Open UniFi Network → **Settings** → **Admins & Users**
-2. Click **Add Admin**
-3. Set **Account Type** to **Local Access Only** (not Ubiquiti SSO)
-4. Username: `bollard` (or any name you prefer)
-5. Role: **Network Admin**
-6. Save the account
-7. Open the new account's profile → **API Keys** → **Generate API Key**
-8. Copy the key — it is only shown once
+1. In UniFi Network, open **Settings → Admins & Users** and add a local-access admin (for example `bollard`) with a role that can manage DNS.
+2. Open that account and generate an API key. It is shown once; copy it.
 
-> Do not use your primary admin account or an SSO account. A dedicated local account limits blast radius if the key is compromised.
-
-## 2. Create a `.env` file
-
-Store credentials outside your compose file so they are not committed to version control.
+## 2. Create the `.env` file
 
 ```bash
 # /volume1/docker/bollard/.env
-UNIFI_HOST=https://192.168.1.1        # or https://unifi.home.arpa
+UNIFI_HOST=https://unifi.home.arpa
 UNIFI_API_KEY=your-api-key-here
 DATABASE_URL=file:/data/bollard.db
 ```
-
-Optional overrides:
-
-```bash
-UNIFI_SITE=default                    # change if you use a named site
-UNIFI_SKIP_TLS_VERIFY=true            # set false if you have a trusted cert
-RECONCILE_INTERVAL=5m
-LOG_LEVEL=info
-```
-
-Restrict permissions:
 
 ```bash
 chmod 600 /volume1/docker/bollard/.env
 ```
 
-## 3. Add bollard to docker-compose.yml
+`UNIFI_SKIP_TLS_VERIFY` defaults to **`true`**, which disables certificate checks. That is convenient for the first run on a self-signed controller but exposes the API key to anyone who can intercept the connection. Once it works, switch to verification: set `UNIFI_SKIP_TLS_VERIFY=false`, or mount your CA and set `UNIFI_CA_CERT` (see [`examples/custom-ca.yml`](examples/custom-ca.yml)).
+
+If your site is not the default, set `UNIFI_SITE` to its display name or UUID. All settings: [Configuration reference](configuration.md).
+
+## 3. Start bollard
 
 ```yaml
 # /volume1/docker/bollard/docker-compose.yml
@@ -67,16 +60,26 @@ volumes:
   bollard-data:
 ```
 
-Start bollard:
+Pin a version tag instead of `latest` once you are happy.
 
 ```bash
 cd /volume1/docker/bollard
 docker compose up -d
+docker compose logs bollard
 ```
 
-## 4. Label your first container
+Expected log lines (the `logfmt` format is a colourised text format; timestamps, levels, and fields abridged here):
 
-Add a `dns.bollard/hostname` label to any container you want registered:
+```
+INF msg="bollard starting" version=... go=... os=linux arch=...
+INF msg=configuration unifi_host=https://unifi.home.arpa unifi_site=default unifi_tls_verify=false database=file:/data/bollard.db ...
+INF msg="state store ready" owned_records=0
+INF msg="bollard started" reconcile_interval=5m0s
+```
+
+`unifi_tls_verify=false` here means verification is off (the default). If bollard exits instead, see [Troubleshooting](#troubleshooting).
+
+## 4. Label a container
 
 ```yaml
 services:
@@ -86,67 +89,44 @@ services:
       dns.bollard/hostname: myapp.home.arpa
 ```
 
-Restart the container to trigger the start event:
+Labels are read when a container starts, so recreate it:
 
 ```bash
-docker compose up -d
+docker compose up -d --force-recreate myapp
 ```
 
-## 5. Verify the DNS record was created
+If the host has several IPv4 addresses, add `dns.bollard/ip-override: "192.168.1.100"` (your host IP).
 
-**In the UniFi UI:**
+## 5. Verify
 
-1. UniFi Network → **Settings** → **DNS**
-2. Look for an A record with the hostname you set
-3. The record should point to the NAS IP address
+Logs should show:
 
-**From the CLI:**
+```
+INF msg="created DNS record" hostname=myapp.home.arpa ip=192.168.1.100 container=myapp(0123456789ab)
+```
+
+Then check UniFi (**Settings → DNS**, or Policy Table depending on version) for an A record, and resolve it:
 
 ```bash
-# Query your UniFi controller as DNS resolver
 dig myapp.home.arpa @192.168.1.1
-
-# Or use the domain if your clients already use UniFi DNS
-dig myapp.home.arpa
 ```
 
-Expected output includes an `ANSWER SECTION` with an `A` record.
+Stop the container and the log shows `deleted DNS record`; the record leaves UniFi.
 
-**Check bollard logs:**
+## Troubleshooting
 
-```bash
-docker compose logs bollard
-```
-
-Healthy output looks like:
-
-```
-level=info msg="bollard starting" version=v0.2.1
-level=info msg="connected to docker" server_version=24.0.5
-level=info msg="connected to unifi" host=https://unifi.home.arpa
-level=info msg="dns record created" hostname=myapp.home.arpa ip=192.168.1.100 record_id=abc123
-```
-
-## 6. Troubleshoot first-run issues
-
-Enable debug logging for more detail:
-
-```bash
-# In .env
-LOG_LEVEL=debug
-```
-
-```bash
-docker compose up -d && docker compose logs -f bollard
-```
-
-**Common issues:**
+bollard exits non-zero on configuration, store, UniFi probe, or Docker socket errors; `restart: unless-stopped` retries.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `connection refused` to UniFi | Wrong `UNIFI_HOST` or controller not reachable | Check host URL and network connectivity |
-| `401 Unauthorized` | Bad `UNIFI_API_KEY` | Regenerate key in UniFi, update `.env` |
-| `certificate verify failed` | Self-signed UniFi cert | Set `UNIFI_SKIP_TLS_VERIFY=true` or mount CA cert |
-| No record created, no error | Container missing `dns.bollard/hostname` label | Verify label is set, restart container |
-| `fatal: cannot open database` | `DATABASE_URL` path not writable | Check volume mount and permissions |
-| Docker socket permission denied | Synology DSM user not in `docker` group | Run bollard as root or adjust socket permissions |
+| `config error` mentioning `UNIFI_HOST`/`UNIFI_API_KEY` | Variable missing | Check `.env` is loaded (`env_file`) |
+| `site "..." not found` | `UNIFI_SITE` does not match a site name or ID | Use the display name or UUID |
+| `site probe failed (status=401...` | Bad API key or insufficient rights | Regenerate the key |
+| TLS error mentioning unknown authority | `UNIFI_SKIP_TLS_VERIFY=false` without a trusted CA | Set `UNIFI_CA_CERT` |
+| `state store unavailable` | `DATABASE_URL` path not writable or database unreachable | Check the volume mount |
+| `docker socket unavailable` | Socket not mounted or permission denied | Check the mount and socket permissions |
+| `invalid labels on container` | Bad TTL, record type, IP, or enabled value | See [labels](configuration.md#container-labels) |
+| `multiple routable IPv4 addresses found` | Ambiguous host IP | Set `dns.bollard/ip-override` |
+| `hostname ... already owned by container` | Two containers claim one hostname | Make hostnames unique |
+
+Set `LOG_LEVEL=debug` for extra detail. For day-two tasks, see [Operations](operations.md).

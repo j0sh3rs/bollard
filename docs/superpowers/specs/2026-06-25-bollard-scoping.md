@@ -1,5 +1,7 @@
 # bollard — Scoping Document
 
+> **Historical document (June 2026).** Written before implementation; Postgres, metrics, and other details have since changed. For current behaviour see [Architecture](../../architecture.md) and [Configuration](../../configuration.md).
+
 **Date:** 2026-06-25
 **Status:** Draft — pending review
 

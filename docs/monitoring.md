@@ -1,370 +1,134 @@
 # Monitoring reference
 
+Metrics and alerting for the **standalone Docker daemon**. The Traefik plugin exports no Prometheus metrics; monitor it through Traefik logs ([Traefik provider plugin](traefik-plugin.md)).
+
 ## Endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /metrics` | Prometheus text exposition format |
-| `GET /healthz` | Liveness probe — returns HTTP 200 when bollard is running |
+| `GET /metrics` | Prometheus exposition format |
+| `GET /healthz` | Returns HTTP 200 while the process serves HTTP. It does not test UniFi, Docker, or the store |
 
-Both endpoints are served on the address configured by `METRICS_ADDR` (default `:9090`).
+Both are served on `METRICS_ADDR` (default `:9090`, all interfaces) with no authentication. Restrict access with a firewall or network policy. See [Configuration](configuration.md#metrics_addr) for the healthcheck limitation with host-qualified addresses.
 
-```bash
-# verify metrics
-curl -s localhost:9090/metrics | grep bollard_up
+The registry also exposes the default Go and process collectors.
 
-# liveness check
-curl -sf localhost:9090/healthz && echo "healthy"
-```
+## What is actually recorded
 
-**Security:** neither endpoint has authentication. In production bind `METRICS_ADDR` to a loopback address or restrict access via network policy / firewall rules.
+All metrics are registered at startup, but not all are written by the code on `main`. Verified against `main.go` and `internal/reconciler`:
 
-```bash
-# loopback-only
-METRICS_ADDR=127.0.0.1:9090
-```
+| Metric | Status |
+|---|---|
+| `bollard_records_total` | recorded |
+| `bollard_records_active` | recorded (after each reconcile tick only) |
+| `bollard_record_hostname_conflicts_total` | recorded |
+| `bollard_reconcile_orphans_cleaned_total` | recorded |
+| `bollard_reconcile_missed_recovered_total` | recorded |
+| `bollard_reconcile_iterations_total` | recorded |
+| `bollard_reconcile_duration_seconds` | recorded (successful ticks only) |
+| `bollard_reconcile_last_timestamp_seconds` | recorded |
+| `bollard_docker_events_total` | recorded |
+| `bollard_docker_event_errors_total` | recorded (`stage="handle"` only) |
+| `bollard_unifi_requests_total` | **declared, never recorded** (no series appear) |
+| `bollard_unifi_request_duration_seconds` | **declared, never recorded** |
+| `bollard_unifi_api_version` | **declared, never recorded** |
+| `bollard_build_info` | recorded |
+| `bollard_up` | recorded: `0` during startup, `1` once the event loop starts; never reset to `0` on shutdown |
 
----
+Do not build alerts on the three UniFi metrics until they are wired. Use `bollard_reconcile_iterations_total`, `bollard_docker_event_errors_total`, and `bollard_records_total{success="false"}` as the available UniFi-failure signals.
 
 ## Metrics reference
 
-### DNS Records
+### DNS records
 
 #### `bollard_records_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | `action` (`created`, `deleted`, `adopted`), `success` (`true`, `false`) |
+Counter. Labels: `action` (`created`, `deleted`, `adopted`), `success` (`true`, `false`).
 
-Incremented on every DNS record lifecycle operation. A `success=false` sample indicates the UniFi write failed; the reconcile loop will retry.
+Incremented per lifecycle operation. `success="false"` covers IP resolution failure, UniFi create failure, store write failure after create, store delete failure, and UniFi delete failure. `adopted` is only ever recorded with `success="true"`. A failed create is retried only when a later event or the reconcile missed-event pass sees the container again; a failed delete is not retried (see [Architecture](architecture.md#container-stop)).
 
 ```promql
-# creation rate over 5 minutes
 rate(bollard_records_total{action="created"}[5m])
-
-# failure rate (any action)
-rate(bollard_records_total{success="false"}[5m])
+increase(bollard_records_total{success="false"}[15m]) > 0
 ```
-
----
 
 #### `bollard_records_active`
 
-| Field | Value |
-|---|---|
-| Type | Gauge |
-| Labels | none |
-
-Number of DNS records currently owned by bollard in the state store. Drops to zero only if all owned records are deleted or the store is wiped.
-
-```promql
-bollard_records_active
-```
-
----
+Gauge. Records in the store, refreshed at the end of each reconcile tick. It reads `0` from startup until the first tick (one `RECONCILE_INTERVAL`) even if the store has rows; the log line `state store ready owned_records=N` has the immediate count.
 
 #### `bollard_record_hostname_conflicts_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | none |
-
-Incremented when a second container attempts to register a hostname already owned by another container. The conflicting container is left unregistered.
+Counter. A start event whose hostname is already owned by a container in the **store**. Conflicts with UniFi records that bollard does not own are not detected.
 
 ```promql
 increase(bollard_record_hostname_conflicts_total[1h])
 ```
 
----
-
-### Reconcile Loop
+### Reconcile loop
 
 #### `bollard_reconcile_orphans_cleaned_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | none |
-
-Orphaned state-store rows cleaned during reconcile — records in the store whose container is no longer running. Triggered when a container exits without emitting a Docker stop event.
-
-```promql
-increase(bollard_reconcile_orphans_cleaned_total[1h])
-```
-
----
+Counter. Store rows removed because their UniFi record no longer exists (deleted or disabled in UniFi). It does not count stopped containers; bollard does not clean those up on reconcile.
 
 #### `bollard_reconcile_missed_recovered_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | none |
-
-DNS records re-created during reconcile for containers that are running but have no matching UniFi record (missed-event recovery).
-
-```promql
-increase(bollard_reconcile_missed_recovered_total[1h])
-```
-
----
+Counter. Running, enabled, labelled containers with no store row that were registered during reconcile (for example a start event missed during a restart).
 
 #### `bollard_reconcile_iterations_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | `status` (`success`, `failure`) |
-
-Total reconcile loop iterations. A `failure` sample means the loop encountered an unrecoverable error during that iteration.
+Counter. Label `status` (`success`, `failure`). `failure` means the store or UniFi could not be listed that tick. Per-container recovery failures are logged but do not fail the tick.
 
 ```promql
-# success rate
-rate(bollard_reconcile_iterations_total{status="success"}[15m])
-
-# failure rate
 rate(bollard_reconcile_iterations_total{status="failure"}[15m])
 ```
 
----
-
 #### `bollard_reconcile_duration_seconds`
 
-| Field | Value |
-|---|---|
-| Type | Histogram |
-| Labels | none |
-| Buckets | 0.1, 0.5, 1, 2, 5, 10, 30 seconds |
-
-Duration of each reconcile loop iteration.
+Histogram, buckets 0.1, 0.5, 1, 2, 5, 10, 30 s. Observed for successful ticks only.
 
 ```promql
-# 99th-percentile reconcile duration
 histogram_quantile(0.99, rate(bollard_reconcile_duration_seconds_bucket[15m]))
 ```
 
----
-
 #### `bollard_reconcile_last_timestamp_seconds`
 
-| Field | Value |
-|---|---|
-| Type | Gauge |
-| Labels | none |
-
-Unix epoch timestamp of the last successfully completed reconcile. Use to detect a stuck reconcile loop.
+Gauge. Unix time of the last successful tick. Absent until the first tick succeeds.
 
 ```promql
-# seconds since last successful reconcile
 time() - bollard_reconcile_last_timestamp_seconds
 ```
 
----
-
-### Docker Events
+### Docker events
 
 #### `bollard_docker_events_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | `type` (`start`, `stop`) |
-
-Docker container events received from the event stream.
-
-```promql
-rate(bollard_docker_events_total[5m])
-```
-
----
+Counter. Label `type` (`start`, `stop`). `stop` covers both `die` and `destroy`, so one `docker rm` of a running container can count twice.
 
 #### `bollard_docker_event_errors_total`
 
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | `stage` (`handle`) |
-
-Errors encountered while processing Docker events. Increment indicates a label parse error or a failed UniFi write triggered by an event.
+Counter. Label `stage`, currently only `handle`. Increments when handling an event returned an error: UniFi failure, hostname conflict, ambiguous host IP, or store failure. Invalid labels are logged as warnings and are **not** counted.
 
 ```promql
 rate(bollard_docker_event_errors_total[5m])
 ```
 
----
+### UniFi API (declared, not recorded)
 
-### UniFi API
-
-#### `bollard_unifi_requests_total`
-
-| Field | Value |
-|---|---|
-| Type | Counter |
-| Labels | `method` (`GET`, `POST`, `DELETE`), `status` (`2xx`, `4xx`, `5xx`, `error`) |
-
-HTTP requests made to the UniFi API. `error` status indicates a network-level failure (no HTTP response received).
-
-```promql
-# error rate
-rate(bollard_unifi_requests_total{status=~"5xx|error"}[5m])
-
-# request rate by method
-rate(bollard_unifi_requests_total[5m])
-```
-
----
-
-#### `bollard_unifi_request_duration_seconds`
-
-| Field | Value |
-|---|---|
-| Type | Histogram |
-| Labels | `method` (`GET`, `POST`, `DELETE`) |
-| Buckets | 0.01, 0.05, 0.1, 0.5, 1, 2, 5 seconds |
-
-Latency of UniFi API requests.
-
-```promql
-# 95th-percentile latency for POST requests
-histogram_quantile(0.95, rate(bollard_unifi_request_duration_seconds_bucket{method="POST"}[5m]))
-```
-
----
-
-#### `bollard_unifi_api_version`
-
-| Field | Value |
-|---|---|
-| Type | Gauge |
-| Labels | `provider` (`modern`, `legacy`) |
-
-Indicates which UniFi API provider bollard negotiated at startup. Set to `1` for the active provider, absent for the inactive one. `modern` = UniFi Network Application ≥7.x REST API; `legacy` = older API path.
-
-```promql
-bollard_unifi_api_version
-```
-
----
+`bollard_unifi_requests_total{method,status}`, `bollard_unifi_request_duration_seconds{method}`, and `bollard_unifi_api_version{provider}` are defined but no code writes them on `main`. They will not appear in `/metrics` output.
 
 ### Process
 
 #### `bollard_build_info`
 
-| Field | Value |
-|---|---|
-| Type | Gauge |
-| Labels | `version` (semver), `goversion` (e.g. `go1.22.3`) |
-
-Always `1`. Use to correlate dashboards with deployed version and join on `version` in alerting rules.
-
-```promql
-bollard_build_info
-```
-
----
+Gauge, always `1`. Labels `version`, `goversion`.
 
 #### `bollard_up`
 
-| Field | Value |
-|---|---|
-| Type | Gauge |
-| Labels | none |
-
-`1` when bollard is running normally. Set to `0` on graceful shutdown before the process exits. Absence of this metric (scrape fails) also indicates bollard is down.
-
-```promql
-bollard_up
-```
-
----
+Gauge. `0` while starting, `1` once the event loop begins. It is **not** set to `0` on shutdown or on failure, so `bollard_up == 0` does not indicate an outage. Use the scrape's own `up` series for liveness.
 
 ## Alerting
 
-### PrometheusRule (Kubernetes CRD)
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: bollard
-  namespace: monitoring
-  labels:
-    prometheus: kube-prometheus
-    role: alert-rules
-spec:
-  groups:
-    - name: bollard
-      interval: 60s
-      rules:
-        - alert: BollardDown
-          expr: bollard_up == 0
-          for: 1m
-          labels:
-            severity: critical
-          annotations:
-            summary: "bollard is down"
-            description: "bollard_up is 0 on {{ $labels.instance }}. DNS record management has stopped."
-
-        - alert: BollardReconcileStuck
-          expr: (time() - bollard_reconcile_last_timestamp_seconds) > 2 * 300
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "bollard reconcile loop is stuck"
-            description: >
-              Last reconcile was {{ $value | humanizeDuration }} ago on {{ $labels.instance }}.
-              Expected every RECONCILE_INTERVAL (default 5m). Orphaned records may not be cleaned.
-
-        - alert: BollardReconcileFailing
-          expr: rate(bollard_reconcile_iterations_total{status="failure"}[15m]) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "bollard reconcile loop is failing"
-            description: >
-              Reconcile failures detected on {{ $labels.instance }}.
-              Check logs for root cause. DNS records may become stale.
-
-        - alert: BollardUnifiAPIErrors
-          expr: rate(bollard_unifi_requests_total{status=~"5xx|error"}[5m]) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "bollard UniFi API errors"
-            description: >
-              UniFi API requests are returning 5xx or network errors on {{ $labels.instance }}.
-              DNS record operations may be failing silently.
-
-        - alert: BollardDockerEventErrors
-          expr: rate(bollard_docker_event_errors_total[5m]) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "bollard Docker event handling errors"
-            description: >
-              Errors processing Docker events on {{ $labels.instance }}.
-              Some container start/stop events may have been dropped.
-
-        - alert: BollardHostnameConflict
-          expr: increase(bollard_record_hostname_conflicts_total[1h]) > 0
-          for: 0m
-          labels:
-            severity: warning
-          annotations:
-            summary: "bollard hostname conflict detected"
-            description: >
-              A container attempted to register a hostname already owned by another container on
-              {{ $labels.instance }}. The conflicting container has no DNS record.
-              Review container labels for duplicate hostnames.
-```
-
-### Standalone `alerts.yml` (bare Prometheus)
+These rules use only metrics that are recorded. Replace `job="bollard"` with your scrape job name. The stuck-reconcile threshold hard-codes the default 300 s interval; use `2 * RECONCILE_INTERVAL` in seconds if you changed it.
 
 ```yaml
 groups:
@@ -372,13 +136,13 @@ groups:
     interval: 60s
     rules:
       - alert: BollardDown
-        expr: bollard_up == 0
-        for: 1m
+        expr: up{job="bollard"} == 0
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "bollard is down"
-          description: "bollard_up is 0. DNS record management has stopped."
+          summary: "bollard is not scrapeable"
+          description: "DNS record management may have stopped on {{ $labels.instance }}."
 
       - alert: BollardReconcileStuck
         expr: (time() - bollard_reconcile_last_timestamp_seconds) > 2 * 300
@@ -386,10 +150,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "bollard reconcile loop is stuck"
-          description: >
-            Last reconcile was {{ $value | humanizeDuration }} ago.
-            Expected every RECONCILE_INTERVAL (default 5m).
+          summary: "bollard has not reconciled recently"
+          description: "No successful reconcile for {{ $value | humanizeDuration }} on {{ $labels.instance }}."
 
       - alert: BollardReconcileFailing
         expr: rate(bollard_reconcile_iterations_total{status="failure"}[15m]) > 0
@@ -397,17 +159,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "bollard reconcile loop is failing"
-          description: "Reconcile failures detected. Check logs."
-
-      - alert: BollardUnifiAPIErrors
-        expr: rate(bollard_unifi_requests_total{status=~"5xx|error"}[5m]) > 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "bollard UniFi API errors"
-          description: "UniFi API requests are returning 5xx or network errors."
+          summary: "bollard reconcile is failing"
+          description: "The store or UniFi could not be listed. Check logs on {{ $labels.instance }}."
 
       - alert: BollardDockerEventErrors
         expr: rate(bollard_docker_event_errors_total[5m]) > 0
@@ -415,8 +168,17 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "bollard Docker event handling errors"
-          description: "Errors processing Docker events. Some events may have been dropped."
+          summary: "bollard failed to handle Docker events"
+          description: "Some containers may lack DNS records, or deleted containers may leave records in UniFi. Check logs."
+
+      - alert: BollardRecordOperationFailures
+        expr: increase(bollard_records_total{success="false"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "bollard record operation failed"
+          description: "A create or delete failed on {{ $labels.instance }}."
 
       - alert: BollardHostnameConflict
         expr: increase(bollard_record_hostname_conflicts_total[1h]) > 0
@@ -424,73 +186,25 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "bollard hostname conflict detected"
-          description: "A container attempted to register a duplicate hostname. Review container labels."
+          summary: "bollard hostname conflict"
+          description: "Two containers claim the same hostname. Review labels."
 ```
 
-> **Threshold for `BollardReconcileStuck`:** the expression uses `300` (seconds) as the default `RECONCILE_INTERVAL`. If you change `RECONCILE_INTERVAL`, update the threshold to `2 * <interval_in_seconds>`.
+For the Prometheus Operator, put the same `groups` under `spec:` of a `PrometheusRule` (`apiVersion: monitoring.coreos.com/v1`) with the labels your Prometheus selects on.
 
----
+## Grafana panels
 
-## Grafana dashboard panels
+| Panel | Type | Query |
+|---|---|---|
+| Scrape up | Stat | `up{job="bollard"}` |
+| Version | Table | `bollard_build_info` |
+| Active records | Stat | `bollard_records_active` |
+| Record operations / min | Time series | `rate(bollard_records_total[5m]) * 60` (legend `{{action}} {{success}}`) |
+| Reconcile p99 | Time series | `histogram_quantile(0.99, rate(bollard_reconcile_duration_seconds_bucket[15m]))` |
+| Reconcile failures / min | Time series | `rate(bollard_reconcile_iterations_total{status="failure"}[15m]) * 60` |
+| Event errors / min | Time series | `rate(bollard_docker_event_errors_total[5m]) * 60` |
 
-Build a dashboard from these five panels. Import the datasource UID for your Prometheus instance.
-
-### Panel 1 — Process health
-
-| Field | Value |
-|---|---|
-| Title | `bollard health` |
-| Visualization | Stat |
-| PromQL | `bollard_up` |
-
-Set value mappings: `1` → `Running` (green), `0` → `Down` (red). Add `bollard_build_info` as a table panel below to display the deployed version.
-
-### Panel 2 — Active DNS records
-
-| Field | Value |
-|---|---|
-| Title | `Active DNS records` |
-| Visualization | Stat |
-| PromQL | `bollard_records_active` |
-
-### Panel 3 — Record operations rate
-
-| Field | Value |
-|---|---|
-| Title | `Record operations / min` |
-| Visualization | Time series |
-| PromQL | `rate(bollard_records_total[5m]) * 60` |
-
-Legend: `{{action}} {{success}}`. Helps identify creation/deletion bursts.
-
-### Panel 4 — Reconcile duration
-
-| Field | Value |
-|---|---|
-| Title | `Reconcile p99 duration` |
-| Visualization | Time series |
-| PromQL | `histogram_quantile(0.99, rate(bollard_reconcile_duration_seconds_bucket[15m]))` |
-
-Add a second series for p50: `histogram_quantile(0.50, rate(bollard_reconcile_duration_seconds_bucket[15m]))`.
-
-### Panel 5 — UniFi API error rate
-
-| Field | Value |
-|---|---|
-| Title | `UniFi API errors / min` |
-| Visualization | Time series |
-| PromQL | `rate(bollard_unifi_requests_total{status=~"5xx|error"}[5m]) * 60` |
-
-Non-zero values indicate connectivity problems with the UniFi controller.
-
----
-
-## Docker Compose integration
-
-### Adding bollard to an existing Prometheus stack
-
-Add a scrape job to your Prometheus `scrape_configs`:
+## Scraping
 
 ```yaml
 scrape_configs:
@@ -499,8 +213,4 @@ scrape_configs:
       - targets: ["bollard:9090"]
 ```
 
-If bollard uses `network_mode: host`, replace `bollard` with the host IP or DNS name reachable from the Prometheus container.
-
-### Minimal compose example
-
-See [`docs/examples/monitoring-compose.yml`](examples/monitoring-compose.yml) for a working bollard + Prometheus compose stack.
+With `network_mode: host`, use the host's address. A working Compose stack with Prometheus is in [`examples/monitoring-compose.yml`](examples/monitoring-compose.yml).

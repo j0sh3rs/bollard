@@ -89,6 +89,19 @@ func TestTraefikPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	// A cold Docker pull writes progress to stderr before printing the container ID.
+	// Inject that output even when CI's image cache is warm.
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\nif [ \"$1\" = run ]; then printf 'Pulling smoke image\\n' >&2; fi\nexec \"$BOLLARD_SMOKE_DOCKER\" \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BOLLARD_SMOKE_DOCKER", docker)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	static := fmt.Sprintf(`entryPoints:
   web:
     address: ":8000"

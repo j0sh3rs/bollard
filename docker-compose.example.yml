@@ -1,6 +1,8 @@
+# Standalone controller. For the Traefik plugin, use docs/examples/traefik-plugin/.
+# Use a trusted controller certificate or follow docs/examples/custom-ca.yml.
 services:
   bollard:
-    image: ghcr.io/j0sh3rs/bollard:latest
+    image: ghcr.io/j0sh3rs/bollard:v0.7.0
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -8,9 +10,9 @@ services:
       - bollard-data:/data
     environment:
       UNIFI_HOST: https://unifi.home.arpa
-      UNIFI_API_KEY: ${UNIFI_API_KEY}
-      UNIFI_SITE: default
-      UNIFI_SKIP_TLS_VERIFY: "true"
+      UNIFI_API_KEY: ${UNIFI_API_KEY:?Set UNIFI_API_KEY in your private .env file}
+      UNIFI_SITE: ${UNIFI_SITE:-Default} # Modern API display name or UUID; legacy site reference.
+      UNIFI_SKIP_TLS_VERIFY: "false"
       DATABASE_URL: file:/data/bollard.db
       RECONCILE_INTERVAL: 5m
       LOG_FORMAT: logfmt

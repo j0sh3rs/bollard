@@ -1,0 +1,28 @@
+entryPoints:
+  web:
+    address: ":80"
+  bollard-api:
+    address: "127.0.0.1:8081"
+
+api:
+  insecure: false
+  dashboard: false
+
+log:
+  level: INFO
+
+providers:
+  file:
+    directory: /rendered/dynamic
+    watch: true
+  plugin:
+    bollard:
+      traefikAPI: http://127.0.0.1:8081
+      unifiHost: "@UNIFI_HOST@"
+      unifiAPIKeyFile: /run/secrets/unifi_api_key
+      unifiSite: "@UNIFI_SITE@"
+      unifiCACert: "@UNIFI_CA_CERT@"
+      unifiSkipTLSVerify: @UNIFI_SKIP_TLS_VERIFY@
+      address: "@TRAEFIK_ADDRESS@"
+      pollInterval: "@POLL_INTERVAL@"
+

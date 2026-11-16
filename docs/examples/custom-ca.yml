@@ -7,9 +7,10 @@
 # Steps:
 #   1. Export your CA certificate in PEM format
 #   2. Place it at a path accessible on the NAS, e.g. /volume1/docker/bollard/ca.pem
-#   3. Set UNIFI_SKIP_TLS_VERIFY=false in your .env
-#   4. Do NOT set UNIFI_CA_CERT in .env — set it in the environment block below
-#      so the path is the container-internal path, not the host path.
+#   3. Set UNIFI_CA_CERT in the environment block below, to the container-internal
+#      path (not the host path). When set, TLS is verified against that CA only
+#      and UNIFI_SKIP_TLS_VERIFY is ignored. A missing or invalid PEM file is a
+#      fatal startup error.
 #
 # Required .env file:
 #   UNIFI_HOST=https://unifi.home.arpa

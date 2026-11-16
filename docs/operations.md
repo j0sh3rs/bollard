@@ -1,253 +1,124 @@
 # Operations guide
 
-## Checking bollard status
+Task-oriented procedures for the **standalone Docker daemon**. Setup is in [Getting started](getting-started.md); settings in [Configuration](configuration.md); behaviour in [Architecture](architecture.md). The Traefik plugin keeps no state, so none of this applies to it; see [Traefik provider plugin](traefik-plugin.md).
+
+## Check status
 
 ```bash
-docker compose logs bollard
-docker compose logs -f bollard    # follow
 docker compose logs --tail=50 bollard
+docker compose ps                       # image healthcheck state
+curl -sf localhost:9090/healthz && echo healthy
 ```
 
-**Healthy startup output:**
+`/healthz` returns 200 whenever the process is serving; it does not check UniFi or Docker connectivity. Use metrics for that ([Monitoring](monitoring.md)).
 
-```
-level=info msg="bollard starting" version=v0.2.1
-level=info msg="connected to docker" server_version=24.0.5
-level=info msg="connected to unifi" host=https://unifi.home.arpa site=default
-level=info msg="reconcile loop started" interval=5m0s
-```
+Log messages you should recognise (abridged):
 
-**Healthy operation output (on container start):**
+| Message | Meaning |
+|---|---|
+| `bollard started` | Event loop running; first reconcile is one interval away |
+| `created DNS record` / `deleted DNS record` | Normal lifecycle |
+| `invalid labels on container` | Container skipped; fix labels |
+| `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
+| `orphaned store record, cleaning up` | A store row pointed at a UniFi record that no longer exists; row removed |
+| `reconcile failed` | Store or UniFi listing failed this tick |
+| `failed to delete unifi record` | UniFi delete failed after the store row was removed |
 
-```
-level=info msg="container started" container=myapp hostname=myapp.home.arpa
-level=info msg="dns record created" hostname=myapp.home.arpa ip=192.168.1.100 record_id=6787a1b2c3d4e5f6
-```
+Startup failures exit non-zero and Docker restarts the container; read the last log line before the exit.
 
-**Healthy operation output (on container stop):**
+## Adopt existing records
 
-```
-level=info msg="container stopped" container=myapp hostname=myapp.home.arpa
-level=info msg="dns record deleted" hostname=myapp.home.arpa record_id=6787a1b2c3d4e5f6
-```
+Use `--adopt` when the state store was lost or replaced and UniFi already holds the records, or when you moved bollard to a new host.
 
-**Healthy reconcile output (debug level):**
+What it does: for each running, enabled, labelled container without a store row, it looks for an enabled UniFi A record with the same hostname and IP. A match is written to the store; **no match causes the record to be created**. It never deletes records. After the phase completes, bollard continues into normal operation, so it does not exit.
 
-```
-level=debug msg="reconcile tick" owned_records=3 running_containers=3
-level=debug msg="reconcile complete" created=0 deleted=0 errors=0
-```
-
-**Warning: UniFi temporarily unreachable:**
-
-```
-level=warn msg="unifi write failed, will retry" hostname=myapp.home.arpa error="connection refused"
-```
-
-This is non-fatal. The reconcile loop will retry on the next tick.
-
-## `--adopt` workflow
-
-Use `--adopt` when:
-- The bollard database was deleted or corrupted
-- You migrated bollard to a new host and DNS records already exist in UniFi
-- You want bollard to take ownership of records it did not create (records that happen to match running containers by hostname + IP)
-
-`--adopt` is non-destructive. It never creates or deletes DNS records. It only claims ownership in the local state store.
-
-**Step-by-step:**
-
-1. Confirm the containers you want adopted are running:
-
-```bash
-docker ps --filter "label=dns.bollard/hostname"
-```
-
-2. Update your compose file to add the `--adopt` command:
+1. Confirm the containers are running: `docker ps --filter label=dns.bollard/hostname`.
+2. Start bollard once with the flag:
 
 ```yaml
 services:
   bollard:
     image: ghcr.io/j0sh3rs/bollard:latest
     command: ["--adopt"]
-    restart: "no"          # prevent restart loop
-    network_mode: host
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - bollard-data:/data
-    env_file: .env
+    # remaining settings unchanged
 ```
 
-3. Run adopt:
+3. `docker compose up -d bollard` and watch for `starting adopt phase` and `adopt phase complete, starting normal operation`.
+4. Remove `command: ["--adopt"]` and run `docker compose up -d bollard` again. Leaving it in place is harmless but re-runs adopt on every start.
+
+Adopt does not touch records for containers that are no longer running; see the next section.
+
+## Clean up stale records
+
+bollard deletes a record only when it sees the container's `die`/`destroy` event. If a container stopped while bollard was down, or an event was lost, reconcile will **not** remove the record. Find and remove them manually:
 
 ```bash
-docker compose up bollard
+# SQLite: owned records
+sqlite3 /path/to/bollard.db "SELECT hostname, ip, unifi_record_id FROM records ORDER BY hostname;"
+# Postgres
+psql "$DATABASE_URL" -c "SELECT hostname, ip, unifi_record_id FROM records ORDER BY hostname;"
+
+docker ps --filter label=dns.bollard/hostname --format '{{.Names}}'
 ```
 
-4. Watch the output. Successful adoption looks like:
+Compare the two lists. For each hostname with no running container, delete the record in the UniFi DNS settings. On the next reconcile tick bollard notices the UniFi record is gone and removes the store row (`orphaned store record, cleaning up`). You do not need to edit the store.
 
-```
-level=info msg="adopt: scanning running containers" count=4
-level=info msg="adopt: matched existing record" hostname=myapp.home.arpa record_id=abc123
-level=info msg="adopt: matched existing record" hostname=db.home.arpa record_id=def456
-level=info msg="adopt: no match found" hostname=newservice.home.arpa
-level=info msg="adopt: complete" matched=2 unmatched=1
-level=info msg="transitioning to normal operation"
-```
+If bollard is offline and you want records gone, delete them in UniFi; bollard cleans its store when it next runs.
 
-Unmatched containers (no corresponding UniFi record) will have records created during normal operation.
+Records for stopped containers that you never delete stay in UniFi. Do not reset the store as a shortcut: with the store empty, bollard no longer knows those records are its own.
 
-5. Remove `command: ["--adopt"]` and `restart: "no"` from the compose file:
+## Back up and restore the store
 
-```bash
-# Edit compose file to restore normal config
-docker compose up -d bollard
-```
+The store maps containers to UniFi record IDs. Losing it does not change UniFi, but bollard cannot track or delete those records until you run `--adopt`.
 
-## Backup and restore of state database
-
-The state database records which UniFi DNS record IDs bollard owns. Losing it does not cause data loss in UniFi, but bollard will not be able to clean up its records until you run `--adopt`.
-
-**What to back up:** the SQLite file at the path configured in `DATABASE_URL`.
-
-Default location when using a named volume: find the volume mount point:
-
-```bash
-docker volume inspect bollard_bollard-data
-# Look for "Mountpoint": "/volume1/@docker/volumes/bollard_bollard-data/_data"
-```
-
-**Back up:**
-
-```bash
-# Stop bollard first for a clean copy
-docker compose stop bollard
-
-sqlite3 /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db ".backup /backup/bollard-$(date +%Y%m%d).db"
-
-docker compose start bollard
-```
-
-Or with `cp` if you accept a brief window of inconsistency (safe while bollard is idle):
-
-```bash
-cp /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db /backup/bollard-$(date +%Y%m%d).db
-```
-
-**Restore:**
+**SQLite** (file path from `DATABASE_URL`, usually in a named volume). The image has no shell or `sqlite3`; run these on the host, against the volume's mount point (`docker volume inspect <volume>`):
 
 ```bash
 docker compose stop bollard
-cp /backup/bollard-20260101.db /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db
+sqlite3 /path/to/_data/bollard.db ".backup /backup/bollard-$(date +%Y%m%d).db"
 docker compose start bollard
 ```
 
-If the backup is stale (some containers were started/stopped after the backup), run with `--adopt` after restoring to reconcile state.
+Restore by stopping bollard, copying the backup over the database file, and starting it. If the backup is stale, run [`--adopt`](#adopt-existing-records) afterwards.
 
-## Upgrading bollard
+**Postgres**:
 
-For patch releases (no schema changes):
+```bash
+pg_dump "$DATABASE_URL" > /backup/bollard-$(date +%Y%m%d).sql
+```
+
+Restore into an empty database with `psql`. Migrations run automatically on startup and are idempotent.
+
+## Switch the state store
+
+There is no data copy between backends. To move from SQLite to Postgres (or back):
+
+1. Back up the current store.
+2. `docker compose stop bollard`.
+3. Set the new `DATABASE_URL`; start with `--adopt` against the new, empty store ([example](examples/postgres-state.yml)).
+4. Check `state store ready owned_records=N` matches your running labelled containers.
+5. Remove `--adopt`.
+
+Records for containers that are no longer running are not adopted and will remain in UniFi untracked; clean them up as above before switching.
+
+## Upgrade
 
 ```bash
 docker compose pull bollard
 docker compose up -d bollard
-docker compose logs bollard    # verify clean startup
+docker compose logs --tail=20 bollard
 ```
 
-For minor/major releases, check the [CHANGELOG](../CHANGELOG.md) for migration notes before upgrading.
+Read the [CHANGELOG](../CHANGELOG.md) first for minor and major versions. Embedded migrations run on startup. Pin a version tag in production so upgrades are deliberate; `latest` moves.
 
-bollard uses embedded migrations — the database schema is updated automatically on startup if needed.
+## Rotate the UniFi API key
 
-## Viewing owned records
+Create a new key in UniFi, update `UNIFI_API_KEY`, run `docker compose up -d bollard` (environment changes need a recreate), then delete the old key.
 
-Query the SQLite database directly to see what bollard owns:
+## Verify metrics
 
 ```bash
-docker compose stop bollard    # optional, for a consistent read
-
-sqlite3 /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db \
-  "SELECT hostname, ip, record_id, created_at FROM records ORDER BY created_at;"
+curl -s localhost:9090/metrics | grep -E '^bollard_(up|records_active|reconcile_last_timestamp_seconds)'
 ```
 
-Example output:
-
-```
-myapp.home.arpa|192.168.1.100|6787a1b2c3d4e5f6|2026-01-15T10:32:00Z
-db.home.arpa|192.168.1.100|8899aabbccddeeff|2026-01-15T10:32:05Z
-```
-
-With bollard running, you can also read the file with `.dump`:
-
-```bash
-sqlite3 /volume1/@docker/volumes/bollard_bollard-data/_data/bollard.db ".dump records"
-```
-
-## Monitoring
-
-### Verify metrics are being scraped
-
-```bash
-curl -s localhost:9090/metrics | grep bollard_up
-```
-
-Expected output:
-
-```
-# HELP bollard_up 1 when bollard is running normally, 0 otherwise.
-# TYPE bollard_up gauge
-bollard_up 1
-```
-
-### Check last reconcile time
-
-```bash
-curl -s localhost:9090/metrics | grep bollard_reconcile_last_timestamp
-```
-
-The value is a Unix epoch timestamp. To compute seconds since last reconcile:
-
-```bash
-last=$(curl -s localhost:9090/metrics | awk '/^bollard_reconcile_last_timestamp_seconds / {print $2}')
-echo "seconds since last reconcile: $(($(date +%s) - ${last%.*}))"
-```
-
-### Check if bollard is healthy
-
-```bash
-curl -sf localhost:9090/healthz && echo "healthy"
-```
-
-Returns `healthy` with exit code 0 when bollard is running. Non-zero exit or no output indicates bollard is down or the metrics server is not reachable.
-
-For full alerting rules and Grafana panel specs see [docs/monitoring.md](monitoring.md).
-
-## Manually cleaning up orphaned records
-
-If bollard is offline and you need to remove DNS records it created:
-
-**Option 1 — via UniFi UI:**
-
-1. UniFi Network → Settings → DNS
-2. Identify records created by bollard (they match your container hostnames)
-3. Delete them manually
-
-**Option 2 — identify via state DB, delete via UniFi UI:**
-
-```bash
-sqlite3 /path/to/bollard.db \
-  "SELECT hostname, record_id FROM records;"
-```
-
-Use the `record_id` values to locate the exact records in UniFi.
-
-**Option 3 — clean state DB after manual UniFi cleanup:**
-
-If you deleted records in UniFi manually and want bollard's state to be clean on next start:
-
-```bash
-docker compose stop bollard
-sqlite3 /path/to/bollard.db "DELETE FROM records;"
-docker compose start bollard
-```
-
-bollard will re-create records for running containers on the next event or reconcile tick.
+Which metrics are populated is documented in [Monitoring](monitoring.md); several declared metrics are not yet recorded.

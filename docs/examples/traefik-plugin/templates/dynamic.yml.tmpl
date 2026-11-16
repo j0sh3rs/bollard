@@ -1,0 +1,18 @@
+http:
+  routers:
+    # Private router that exposes Traefik's API on the loopback-only entrypoint for the plugin.
+    bollard-api:
+      entryPoints:
+        - bollard-api
+      rule: PathPrefix(`/api`)
+      service: api@internal
+    app:
+      entryPoints:
+        - web
+      rule: Host(`@APP_HOST@`)
+      service: app
+  services:
+    app:
+      loadBalancer:
+        servers:
+          - url: http://app:80

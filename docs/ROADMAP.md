@@ -1,27 +1,38 @@
 # bollard roadmap
 
 Items are grouped by theme and roughly ordered by priority within each group.
-Nothing here is a commitment — priorities shift as real-world usage reveals
+Nothing below the Shipped section is a commitment — priorities shift as real-world usage reveals
 what matters.
 
 ---
 
-## Shipped (v0.x baseline)
+## Shipped
+
+### Standalone Docker daemon (through v0.7.0)
 
 - [x] Docker event-driven A record lifecycle (create/delete)
 - [x] Label-driven opt-in (`dns.bollard/hostname`)
-- [x] SQLite ownership store with migrations
-- [x] Periodic reconcile loop (orphan cleanup + missed-event recovery)
-- [x] `--adopt` flag for state-store recovery
-- [x] UniFi modern API (DNS Policies) + legacy static-DNS, auto-detected
-- [x] Exponential backoff on UniFi failures
-- [x] PostgreSQL store backend (`DATABASE_URL=postgres://…`)
-- [x] Prometheus metrics + `/healthz` endpoint
-- [x] Structured logging (logfmt/json)
-- [x] Multi-arch Docker image (amd64/arm64) with SBOM + Cosign signing
-- [x] SLSA Build Level 2 provenance
-- [x] Renovate with weekly binpacked automerge
-- [x] release-please semantic versioning
+- [x] SQLite and PostgreSQL ownership stores (`DATABASE_URL` selects by scheme) with embedded migrations
+- [x] Periodic reconcile: drops store rows whose UniFi record vanished, registers running labelled containers missing from the store
+- [x] `--adopt` for state-store recovery (matches existing records; creates missing ones)
+- [x] UniFi modern API (DNS policies) with legacy static-DNS fallback, detected at startup
+- [x] Request retries with exponential backoff (429 always; 5xx for GET/DELETE)
+- [x] Prometheus metrics and `/healthz`. Note: the three `bollard_unifi_*` metrics are declared but not yet recorded (see [Monitoring](monitoring.md))
+- [x] Structured logging (`logfmt`-style text or JSON)
+- [x] Multi-arch image (amd64/arm64) with SBOM and Cosign signing, SLSA provenance
+- [x] Renovate and release-please
+
+### Traefik provider plugin
+
+- [x] **v0.7.0**: plugin that discovers Traefik router `Host()` names and creates missing UniFi A records. Create-only, stateless, no Docker socket. See [Traefik provider plugin](traefik-plugin.md).
+
+### Unreleased on `main` (not in v0.7.0)
+
+- [ ] Site lookup by `internalReference` (affects the daemon and plugin)
+- [ ] Plugin treats every named UniFi record, of any type or enabled state, as occupying a hostname
+- [ ] Additional reconcile/concurrency tests
+
+Concurrent plugin instances remain unguarded; run one writer per site and domain scope.
 
 ---
 
@@ -200,13 +211,18 @@ schema, leader election. Likely a separate repository.
 
 ---
 
+## Known gaps
+
+- **Reconcile does not delete UniFi records.** Records for containers that stopped while bollard was down, or whose `die` event was lost, stay until removed by hand. A reconcile pass that deletes owned records whose container is gone is the natural fix.
+- **Duplicate-hostname detection is store-only.** The daemon does not check UniFi for an existing record of the same name before creating.
+- **UniFi metrics not wired.** `bollard_unifi_requests_total`, `bollard_unifi_request_duration_seconds`, and `bollard_unifi_api_version` are declared but never recorded; `bollard_up` is never reset to `0`.
+- **Startup is fail-fast.** An unreachable UniFi controller exits the process rather than retrying in-process.
+- **Healthcheck URL.** `-healthcheck` breaks for `METRICS_ADDR` values with a host part.
+- **Label validation.** Hostnames are not syntax-checked.
+- **Default TLS verification is off** (`UNIFI_SKIP_TLS_VERIFY=true`). Flipping the default is a breaking change to weigh.
+
 ## Open questions
 
-- **Duplicate hostname policy:** currently hard-errors. Should it be
-  configurable (`error` / `overwrite` / `first-wins`)?
-- **Record TTL drain on stop:** immediate delete vs TTL drain — needs operator
-  input on acceptable resolution gap during restarts.
-- **Test coverage gaps:** `Reconcile()` and `Adopt()` paths have no unit tests.
-  An integration test harness with a mock UniFi HTTP server would close this.
-- **Auth hardening:** API key in env var only. Docker secrets support is listed
-  above; should it be Phase 1?
+- **Duplicate hostname policy:** currently hard-errors on store conflicts. Configurable (`error` / `overwrite` / `first-wins`)?
+- **Record TTL drain on stop:** immediate delete vs TTL drain.
+- **Auth hardening:** API key via env var only; Docker secrets support is listed above.

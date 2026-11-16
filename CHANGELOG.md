@@ -2,9 +2,14 @@
 
 ## Unreleased
 
-### Features
+### Bug Fixes
 
-* add a Traefik provider plugin that discovers HTTP router Host rules and creates missing UniFi A records without updating or deleting existing records
+* resolve UniFi sites by their integration API `internalReference`, including the default site named `Default`
+* Traefik plugin treats every named UniFi DNS record (CNAME, disabled, any type) as occupying its hostname and never creates over it; concurrent plugin instances remain unguarded, so use a single writer per site/domain scope
+
+### Tests
+
+* cover Docker pull stderr, repeated reconciliation, missing-record recovery, router removal, partial write failures, and target-IP conflicts
 
 ## [0.7.0](https://github.com/j0sh3rs/bollard/compare/v0.6.1...v0.7.0) (2026-11-15)
 

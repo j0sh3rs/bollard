@@ -1,0 +1,17 @@
+# Overlay: load the plugin from a local source checkout instead of the plugin catalog.
+# Use for unreleased fixes or a mock controller. Needs no catalog access.
+#   docker compose -f compose.yaml -f compose.local-plugin.yaml up -d
+# BOLLARD_SOURCE is the repository ROOT (the directory containing .traefik.yml and go.mod).
+# For a controller on the Docker host, set UNIFI_HOST=http://host.docker.internal:<port>.
+services:
+  render:
+    environment:
+      PLUGIN_SOURCE: local
+  traefik:
+    volumes:
+      - type: bind
+        source: ${BOLLARD_SOURCE:-../../..}
+        target: /plugins-local/src/github.com/j0sh3rs/bollard
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

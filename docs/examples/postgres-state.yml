@@ -1,12 +1,18 @@
-# bollard with Postgres as state store.
+# bollard with Postgres as the state store.
 #
-# NOTE: The Postgres backend is post-MVP. The schema-compatible interface
-# exists in the codebase but is not active in current releases. This example
-# shows the intended configuration pattern for when Postgres support ships.
+# A postgres:// or postgresql:// DATABASE_URL selects
+# the Postgres backend; migrations run automatically at startup.
 #
-# Use this if you are already running Postgres and want to avoid an additional
-# SQLite file to manage. For most homelab operators, the default SQLite backend
-# (file:/data/bollard.db) is simpler and recommended.
+# Use this if you already run Postgres. SQLite on a persistent volume
+# (file:/data/bollard.db) is simpler for a single host.
+#
+# Switching from SQLite does not copy data: start once with `command: ["--adopt"]`
+# against the empty database, then remove it. See docs/operations.md.
+#
+# Run ONE bollard per database and per UniFi site.
+#
+# Postgres is published on loopback only. Use sslmode=require (or stricter)
+# for any DSN that crosses a network, and a strong POSTGRES_PASSWORD.
 #
 # Required .env file:
 #   UNIFI_HOST=https://unifi.home.arpa
@@ -27,14 +33,15 @@ services:
     environment:
       # Postgres DSN — adjust host/user/dbname as needed.
       # When using network_mode: host, 'localhost' resolves to the NAS host,
-      # which is where the postgres container's published port listens.
+      # which is where the postgres container's published (loopback) port listens.
+      # sslmode=disable is acceptable only because traffic stays on this host.
       DATABASE_URL: postgres://bollard:${POSTGRES_PASSWORD}@localhost:5432/bollard?sslmode=disable
 
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: bollard
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

@@ -1,0 +1,52 @@
+# Traefik 3.7.19 + Bollard plugin (remote release) + nginx backend.
+# Traefik's own API is reachable only on 127.0.0.1:8081 inside the Traefik container; it is never published.
+name: bollard-traefik-example
+
+services:
+  # One-shot job: turns templates/*.tmpl and your .env values into Traefik config
+  # (Traefik cannot read environment variables inside static or dynamic files).
+  render:
+    image: ${RENDER_IMAGE:-busybox:stable}
+    restart: "no"
+    entrypoint: ["/bin/sh", "/templates/render.sh"]
+    environment:
+      UNIFI_HOST: ${UNIFI_HOST:?set UNIFI_HOST in .env}
+      UNIFI_SITE: ${UNIFI_SITE:-Default}
+      UNIFI_SKIP_TLS_VERIFY: ${UNIFI_SKIP_TLS_VERIFY:-false}
+      UNIFI_CA_CERT: ${UNIFI_CA_CERT:-}
+      TRAEFIK_ADDRESS: ${TRAEFIK_ADDRESS:?set TRAEFIK_ADDRESS in .env}
+      APP_HOST: ${APP_HOST:-app.home.arpa}
+      POLL_INTERVAL: ${POLL_INTERVAL:-30s}
+      BOLLARD_VERSION: ${BOLLARD_VERSION:-v0.7.0}
+      PLUGIN_SOURCE: remote
+    volumes:
+      - ./templates:/templates:ro
+      - rendered:/rendered
+
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.19}
+    restart: unless-stopped
+    command: ["--configFile=/rendered/traefik.yml"]
+    depends_on:
+      render:
+        condition: service_completed_successfully
+      app:
+        condition: service_started
+    ports:
+      # Only the web entrypoint is published. Port 8081 (Traefik API) is deliberately absent.
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8000}:80"
+    volumes:
+      - rendered:/rendered:ro
+    secrets:
+      - unifi_api_key
+
+  app:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+
+volumes:
+  rendered:
+
+secrets:
+  unifi_api_key:
+    file: ${UNIFI_API_KEY_FILE:-./secrets/unifi_api_key}

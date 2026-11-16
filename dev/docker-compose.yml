@@ -1,6 +1,6 @@
 ---
 # Local development compose — builds bollard from source.
-# Copy dev/.env.example to dev/.env and fill in your UniFi credentials.
+# Copy dev/env.example to dev/.env and fill in your UniFi credentials.
 # Usage:
 #   docker compose -f dev/docker-compose.yml up --build
 #
@@ -35,7 +35,7 @@ services:
       dns.bollard/ttl: "60"
       # Required on Mac/multi-NIC hosts where IP inference is ambiguous.
       # Set to the IP you want the DNS record to point at.
-      dns.bollard/ip-override: "192.168.1.1"
+      dns.bollard/ip-override: "192.0.2.10" # Replace with your client-reachable host IPv4.
     profiles:
       - test
 
