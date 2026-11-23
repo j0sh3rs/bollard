@@ -11,7 +11,7 @@ require (
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/lmittmann/tint v1.2.1
 	github.com/prometheus/client_golang v1.25.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (

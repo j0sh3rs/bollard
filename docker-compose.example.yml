@@ -2,7 +2,7 @@
 # Use a trusted controller certificate or follow docs/examples/custom-ca.yml.
 services:
   bollard:
-    image: ghcr.io/j0sh3rs/bollard:v0.7.0
+    image: ghcr.io/j0sh3rs/bollard:v0.7.1
     restart: unless-stopped
     network_mode: host
     volumes:
