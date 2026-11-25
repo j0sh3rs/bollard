@@ -1,0 +1,5 @@
+.git
+.env
+dev/.env
+docs/examples/traefik-plugin/.env
+docs/examples/traefik-plugin/secrets/
