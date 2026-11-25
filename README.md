@@ -14,7 +14,7 @@ Automatically create UniFi DNS A records for self-hosted services. Choose the Tr
 | DNS target | Explicit client-reachable Traefik IPv4 address | Inferred host IPv4 or per-container override |
 | State | Rebuilt from Traefik and UniFi each poll; no database | Ownership database in SQLite or PostgreSQL |
 | Creates A records | Yes | Yes |
-| Deletes records | Never | Deletes owned records on stop; reconciliation catches missed stops and retries failed deletes |
+| Deletes records | Only the ones it created, at Traefik shutdown (releases after v0.7.2) | Deletes owned records on stop; reconciliation catches missed stops and retries failed deletes |
 | Docker socket required by Bollard | No | Yes |
 | Runs as | A Traefik provider plugin | A separate service |
 
@@ -24,13 +24,15 @@ Automatically create UniFi DNS A records for self-hosted services. Choose the Tr
 
 The first published plugin release is **v0.7.0**. Register it in Traefik's static configuration:
 
+<!-- x-release-please-start-version -->
 ```yaml
 experimental:
   plugins:
     bollard:
       moduleName: github.com/j0sh3rs/bollard
-      version: v0.7.0
+      version: v0.7.2
 ```
+<!-- x-release-please-end -->
 
 Registration alone does not enable discovery. Configure `providers.plugin.bollard`, a private loopback API route, and a UniFi API key file. The [plugin tutorial](docs/traefik/tutorial.md) supplies a complete nginx Compose deployment and DNS/routing checks. Existing installations can use the [integration how-to guide](docs/traefik/how-to.md).
 
@@ -47,7 +49,7 @@ v0.7.1 added two changes to the first plugin release:
 
 For v0.7.0, configure the actual site display name or UUID. For unreleased changes or an unindexed tag, follow the [local plugin instructions](docs/traefik/how-to.md).
 
-The plugin is **create-only**. Router removal, restart, and target-IP changes do not modify existing records. Use one DNS writer per site/domain scope across Traefik replicas. See [plugin concurrency and ownership](docs/traefik/explanation.md).
+The plugin never updates a record. It creates missing records. Releases after v0.7.2 also delete, when Traefik stops the plugin, only the records that instance created; v0.7.2 and earlier leave all records in place. Records from earlier runs, other writers, or created by hand are never deleted. Router removal and target-IP changes do not modify existing records. Use one DNS writer per site/domain scope across Traefik replicas. See [plugin concurrency and ownership](docs/traefik/explanation.md).
 
 ## Start with the standalone controller
 

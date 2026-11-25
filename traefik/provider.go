@@ -43,6 +43,14 @@ func CreateConfig() *Config {
 	}
 }
 
+// Stop must finish inside Traefik's 10s server-close budget: an in-flight create (createTimeout)
+// is drained first, then cleanup (cleanupTimeout) runs.
+const (
+	// shortcut: a create slower than this loses its record ID and the record is orphaned; raise only if Traefik's close budget grows.
+	createTimeout  = 4 * time.Second
+	cleanupTimeout = 5 * time.Second
+)
+
 // Provider discovers routers independently of incoming HTTP requests.
 type Provider struct {
 	ctx            context.Context
@@ -57,6 +65,7 @@ type Provider struct {
 	mu             sync.Mutex
 	cancel         context.CancelFunc
 	done           chan struct{}
+	created        map[string]string // UniFi record ID -> hostname, for records this instance created
 }
 
 // New validates configuration. Network access starts only in Provide.
@@ -171,7 +180,9 @@ func (p *Provider) Provide(configuration chan<- json.Marshaler) error {
 	return nil
 }
 
-// Stop cancels in-flight requests and waits for the worker, then releases idle UniFi connections. DNS records remain intact.
+// Stop cancels in-flight requests and waits for the worker. It then deletes the DNS records this
+// instance created, so they are not orphaned, and releases idle UniFi connections. Records from
+// earlier runs or other writers are never touched.
 func (p *Provider) Stop() error {
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
@@ -180,11 +191,39 @@ func (p *Provider) Stop() error {
 		cancel()
 		<-done
 	}
+	p.cleanup()
 	p.client.CloseIdleConnections()
 	if closer, ok := p.dns.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
 	return nil
+}
+
+// cleanup deletes every record created by this instance. A failure is logged and does not stop the rest.
+// It runs after the worker exits, so created needs no lock. Traefik may cancel p.ctx first, so it uses its own deadline.
+func (p *Provider) cleanup() {
+	if len(p.created) == 0 {
+		return
+	}
+	deadline := time.Now().Add(cleanupTimeout)
+	ids := make([]string, 0, len(p.created))
+	for id := range p.created {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for i, id := range ids {
+		host := p.created[id]
+		// Fair share of the remaining budget, so one hung DELETE cannot starve the rest.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline)/time.Duration(len(ids)-i))
+		err := p.dns.DeleteRecord(ctx, id)
+		cancel()
+		if err != nil {
+			p.logError("delete DNS record for "+host, err)
+			continue
+		}
+		delete(p.created, id)
+		p.logger.Printf("deleted A record %s on shutdown", host)
+	}
 }
 
 type controllerGate struct {
@@ -275,11 +314,19 @@ func (p *Provider) reconcile(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_, err := p.dns.CreateRecord(ctx, unifi.DNSRecord{Hostname: host, IP: p.address, RecordType: "A", TTL: 300})
+		// Shutdown cancels ctx; a POST already sent may still commit in UniFi. Let it finish, bounded,
+		// so Stop learns the record ID and can delete it.
+		createCtx, cancelCreate := context.WithTimeout(context.Background(), createTimeout)
+		id, err := p.dns.CreateRecord(createCtx, unifi.DNSRecord{Hostname: host, IP: p.address, RecordType: "A", TTL: 300})
+		cancelCreate()
 		if err != nil {
 			p.logError("create DNS record for "+host, err)
 			continue
 		}
+		if p.created == nil {
+			p.created = make(map[string]string)
+		}
+		p.created[id] = host
 		p.logger.Printf("created A record %s -> %s", host, p.address)
 	}
 	return nil
