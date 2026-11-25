@@ -58,15 +58,20 @@ func (f *fakeStore) Close() error { return nil }
 
 type fakeLister struct {
 	containers map[string]map[string]string
+	listErr    error
 }
 
 func (f *fakeLister) ListRunning(_ context.Context) (map[string]map[string]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.containers, nil
 }
 
 type fakeProvider struct {
-	records map[string]unifi.DNSRecord
-	nextID  int
+	records   map[string]unifi.DNSRecord
+	nextID    int
+	deleteErr error
 }
 
 func newFakeProvider() *fakeProvider {
@@ -87,6 +92,9 @@ func (f *fakeProvider) CreateRecord(_ context.Context, r unifi.DNSRecord) (strin
 	return id, nil
 }
 func (f *fakeProvider) DeleteRecord(_ context.Context, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.records, id)
 	return nil
 }
@@ -161,5 +169,236 @@ func TestHandleEvent_DuplicateHostname(t *testing.T) {
 	}
 	if len(p.records) != 1 {
 		t.Errorf("expected exactly 1 unifi record, got %d", len(p.records))
+	}
+}
+
+func TestHandleStop_KeepsStoreRowWhenProviderFails(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.deleteErr = fmt.Errorf("unifi unavailable")
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-1", ContainerID: "container-789",
+		Hostname: "stopped.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-stopped",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-stopped"] = unifi.DNSRecord{
+		ID: "unifi-stopped", Hostname: "stopped.home.arpa", IP: "192.168.1.1",
+	}
+
+	err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-789",
+	})
+	if err == nil {
+		t.Fatal("expected error when provider delete fails")
+	}
+	rec, _ := s.GetByContainerID(context.Background(), "container-789")
+	if rec == nil {
+		t.Error("expected store row kept when provider delete fails")
+	}
+	if _, ok := p.records["unifi-stopped"]; !ok {
+		t.Error("expected unifi record to remain when delete fails")
+	}
+}
+
+func TestHandleStop_DeletesRowAndRecord(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-2", ContainerID: "container-ok",
+		Hostname: "ok.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-ok",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-ok"] = unifi.DNSRecord{
+		ID: "unifi-ok", Hostname: "ok.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-ok",
+	}); err != nil {
+		t.Fatalf("HandleEvent stop: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-ok"); rec != nil {
+		t.Error("expected store row removed after stop")
+	}
+	if len(p.records) != 0 {
+		t.Errorf("expected unifi record deleted after stop, got %d", len(p.records))
+	}
+}
+
+func TestReconcile_RetriesDeleteForStoppedContainer(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-3", ContainerID: "container-dead",
+		Hostname: "dead.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead"] = unifi.DNSRecord{
+		ID: "unifi-dead", Hostname: "dead.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead"); rec != nil {
+		t.Error("expected store row deleted by retry pass")
+	}
+	if _, ok := p.records["unifi-dead"]; ok {
+		t.Error("expected unifi record deleted by retry pass")
+	}
+}
+
+func TestReconcile_RetryFailureKeepsRow(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.deleteErr = fmt.Errorf("unifi unavailable")
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-4", ContainerID: "container-dead2",
+		Hostname: "dead2.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead2",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead2"] = unifi.DNSRecord{
+		ID: "unifi-dead2", Hostname: "dead2.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile must not fail when a retry delete fails: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead2"); rec == nil {
+		t.Error("expected store row kept for retry on next tick")
+	}
+	if _, ok := p.records["unifi-dead2"]; !ok {
+		t.Error("expected unifi record to remain when retry delete fails")
+	}
+}
+
+func TestReconcile_RunningContainerNotTouched(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-live": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-5", ContainerID: "container-live",
+		Hostname: "live.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-live",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-live"] = unifi.DNSRecord{
+		ID: "unifi-live", Hostname: "live.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-live"); rec == nil {
+		t.Error("expected store row for running container to remain")
+	}
+	if _, ok := p.records["unifi-live"]; !ok {
+		t.Error("expected unifi record for running container to remain")
+	}
+}
+
+func TestReconcile_ListRunningErrorSkipsDeletes(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{listErr: fmt.Errorf("docker down")}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-6", ContainerID: "container-dead3",
+		Hostname: "dead3.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead3",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead3"] = unifi.DNSRecord{
+		ID: "unifi-dead3", Hostname: "dead3.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile must not fail when ListRunning fails: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead3"); rec == nil {
+		t.Error("expected no deletes when ListRunning fails")
+	}
+	if _, ok := p.records["unifi-dead3"]; !ok {
+		t.Error("expected no record deletes when ListRunning fails")
+	}
+}
+
+func TestReconcile_SkipsDeleteWhenRecordSharedWithRunningRow(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-a": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-a", ContainerID: "container-a",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-b", ContainerID: "container-b",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-shared"] = unifi.DNSRecord{
+		ID: "unifi-shared", Hostname: "dup.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-b"); rec == nil {
+		t.Error("expected stopped row kept while record is shared with a running row")
+	}
+	if _, ok := p.records["unifi-shared"]; !ok {
+		t.Error("expected shared unifi record to remain")
+	}
+}
+
+func TestHandleStop_SkipsDeleteWhenRecordSharedWithRunning(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-a": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-a", ContainerID: "container-a",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-b", ContainerID: "container-b",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-shared"] = unifi.DNSRecord{
+		ID: "unifi-shared", Hostname: "dup.home.arpa", IP: "192.168.1.1",
+	}
+
+	err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-b",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error when record is shared with a running container: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-b"); rec == nil {
+		t.Error("expected stopped row kept when record is shared")
+	}
+	if _, ok := p.records["unifi-shared"]; !ok {
+		t.Error("expected shared unifi record untouched")
 	}
 }

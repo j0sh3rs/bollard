@@ -134,14 +134,25 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 }
 
 func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
-	rec, err := r.store.DeleteByContainerID(ctx, e.ContainerID)
+	rec, err := r.store.GetByContainerID(ctx, e.ContainerID)
 	if err != nil {
-		if r.metrics != nil {
-			r.metrics.RecordsTotal.WithLabelValues("deleted", "false").Inc()
-		}
-		return fmt.Errorf("reconciler: delete from store: %w", err)
+		return fmt.Errorf("reconciler: lookup store row: %w", err)
 	}
 	if rec == nil {
+		return nil
+	}
+
+	shared, err := r.recordSharedWithRunning(ctx, rec)
+	if err != nil {
+		return fmt.Errorf("reconciler: shared-record check: %w", err)
+	}
+	if shared {
+		// Another row for a running container references this record
+		// (duplicate rows). Deleting it would remove the live
+		// container's DNS name; the row stays until the duplicate is
+		// resolved by hand.
+		r.log.Warn("skipping record delete: shared with a running container",
+			"hostname", rec.Hostname, "container", e.Ref(), "unifi_id", rec.UnifiRecordID)
 		return nil
 	}
 	if err := r.provider.DeleteRecord(ctx, rec.UnifiRecordID); err != nil {
@@ -151,6 +162,12 @@ func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 		r.log.Error("failed to delete unifi record", "hostname", rec.Hostname, "container", e.Ref(), "unifi_id", rec.UnifiRecordID, "err", err)
 		return fmt.Errorf("reconciler: delete record %s for %s: %w", rec.Hostname, e.Ref(), err)
 	}
+	if _, err := r.store.DeleteByContainerID(ctx, e.ContainerID); err != nil {
+		// The UniFi record is gone; the row is removed by orphan cleanup on
+		// the next tick. Keep the error so the caller can retry the event.
+		r.log.Error("failed to delete store row", "hostname", rec.Hostname, "container", e.Ref(), "err", err)
+		return fmt.Errorf("reconciler: delete from store: %w", err)
+	}
 	if r.metrics != nil {
 		r.metrics.RecordsTotal.WithLabelValues("deleted", "true").Inc()
 	}
@@ -158,10 +175,47 @@ func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
 	return nil
 }
 
-// Reconcile performs one full reconcile tick. It performs two passes:
+// recordSharedWithRunning reports whether another store row for a
+// currently running container references the same UniFi record. Rows
+// sharing one record can already exist in the store; deleting a shared
+// record would remove a live container's DNS name.
+func (r *Reconciler) recordSharedWithRunning(ctx context.Context, rec *store.Record) (bool, error) {
+	all, err := r.store.ListAll(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reconciler: list store: %w", err)
+	}
+	var siblings []string
+	for _, row := range all {
+		if row.UnifiRecordID == rec.UnifiRecordID && row.ContainerID != rec.ContainerID {
+			siblings = append(siblings, row.ContainerID)
+		}
+	}
+	if len(siblings) == 0 {
+		return false, nil
+	}
+	if r.lister == nil {
+		return true, nil // cannot verify running state; treat as shared (safe)
+	}
+	running, err := r.lister.ListRunning(ctx)
+	if err != nil {
+		return false, fmt.Errorf("reconciler: list running containers: %w", err)
+	}
+	for _, id := range siblings {
+		if _, ok := running[id]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Reconcile performs one full reconcile tick. It performs three passes:
 //  1. Orphan cleanup: store rows whose UniFi record has been deleted externally
 //     are removed from the store.
-//  2. Missed-event recovery: running containers that carry bollard labels but
+//  2. Retry deletes: records whose container is no longer running are
+//     deleted (a failed stop delete, or a missed die/destroy event), and
+//     their store rows removed. Records still referenced by a running row
+//     are never deleted.
+//  3. Missed-event recovery: running containers that carry bollard labels but
 //     have no store row (e.g. events dropped during a restart) are registered.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	storeRecords, err := r.store.ListAll(ctx)
@@ -189,7 +243,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	// Pass 2: missed-event recovery — running containers with labels but no store row.
+	// Pass 2: retry deletes for records whose container has stopped —
+	// either a failed stop delete (the store row was kept) or a missed
+	// die/destroy event. Only rows whose UniFi record still exists.
 	if r.lister == nil {
 		return nil
 	}
@@ -198,6 +254,46 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.log.Warn("reconcile: list running containers failed", "err", err)
 		return nil // best-effort; don't fail the full tick
 	}
+	runningSet := make(map[string]struct{}, len(running))
+	for containerID := range running {
+		runningSet[containerID] = struct{}{}
+	}
+	// Records still referenced by a running row are never deleted, even
+	// when the stopped row is a duplicate of it.
+	runningUnifiIDs := map[string]struct{}{}
+	for _, sr := range storeRecords {
+		if _, ok := runningSet[sr.ContainerID]; ok {
+			runningUnifiIDs[sr.UnifiRecordID] = struct{}{}
+		}
+	}
+	for _, sr := range storeRecords {
+		if _, ok := runningSet[sr.ContainerID]; ok {
+			continue
+		}
+		if _, ok := unifiIndex[sr.UnifiRecordID]; !ok {
+			continue // pass 1 already removed this row
+		}
+		if _, shared := runningUnifiIDs[sr.UnifiRecordID]; shared {
+			r.log.Warn("reconcile: record shared with a running container, not deleting",
+				"hostname", sr.Hostname, "container", sr.ContainerID, "unifi_id", sr.UnifiRecordID)
+			continue
+		}
+		if err := r.provider.DeleteRecord(ctx, sr.UnifiRecordID); err != nil {
+			r.log.Warn("reconcile: retry delete unifi record failed",
+				"hostname", sr.Hostname, "container", sr.ContainerID, "unifi_id", sr.UnifiRecordID, "err", err)
+			continue
+		}
+		if err := r.store.Delete(ctx, sr.ID); err != nil {
+			r.log.Error("reconcile: delete store row after record delete failed", "id", sr.ID, "err", err)
+			continue
+		}
+		r.log.Info("reconcile: deleted record for stopped container", "hostname", sr.Hostname, "container", sr.ContainerID)
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("deleted", "true").Inc()
+		}
+	}
+
+	// Pass 3: missed-event recovery — running containers with labels but no store row.
 	storeIndex := map[string]struct{}{}
 	for _, sr := range storeRecords {
 		storeIndex[sr.ContainerID] = struct{}{}
