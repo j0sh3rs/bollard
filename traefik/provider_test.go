@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/j0sh3rs/bollard/internal/unifi"
 )
 
 func testConfig(endpoint string) *Config {
@@ -167,6 +169,25 @@ func TestProviderStopCancelsDiscovery(t *testing.T) {
 	<-cancelled
 	if err := p.Stop(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type spyDNS struct {
+	unifi.DNSProvider
+	closed atomic.Bool
+}
+
+func (s *spyDNS) CloseIdleConnections() { s.closed.Store(true) }
+
+// Stop must release idle connections held by the cached UniFi provider.
+func TestProviderStopClosesUnifiIdleConnections(t *testing.T) {
+	spy := &spyDNS{}
+	p := &Provider{client: &http.Client{}, dns: spy}
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if !spy.closed.Load() {
+		t.Fatal("Stop did not close idle connections on the unifi provider")
 	}
 }
 

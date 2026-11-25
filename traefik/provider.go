@@ -160,7 +160,7 @@ func (p *Provider) Provide(configuration chan<- json.Marshaler) error {
 	return nil
 }
 
-// Stop cancels in-flight requests and waits for the worker. DNS records remain intact.
+// Stop cancels in-flight requests and waits for the worker, then releases idle UniFi connections. DNS records remain intact.
 func (p *Provider) Stop() error {
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
@@ -170,6 +170,9 @@ func (p *Provider) Stop() error {
 		<-done
 	}
 	p.client.CloseIdleConnections()
+	if closer, ok := p.dns.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 	return nil
 }
 

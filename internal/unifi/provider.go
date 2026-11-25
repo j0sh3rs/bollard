@@ -30,6 +30,7 @@ func New(ctx context.Context, cfg *Config) (DNSProvider, error) {
 		return &modernProvider{transport: t, cfg: cfg, siteID: siteID}, nil
 	}
 	if err != errModernUnsupported {
+		t.CloseIdleConnections()
 		return nil, err
 	}
 	return &legacyProvider{transport: t, cfg: cfg}, nil
@@ -78,6 +79,10 @@ type modernProvider struct {
 	transport *httpTransport
 	cfg       *Config
 	siteID    string
+}
+
+func (p *modernProvider) CloseIdleConnections() {
+	p.transport.CloseIdleConnections()
 }
 
 func (p *modernProvider) policiesURL() string {
@@ -159,6 +164,10 @@ func (p *modernProvider) DeleteRecord(ctx context.Context, unifiID string) error
 type legacyProvider struct {
 	transport *httpTransport
 	cfg       *Config
+}
+
+func (p *legacyProvider) CloseIdleConnections() {
+	p.transport.CloseIdleConnections()
 }
 
 func (p *legacyProvider) baseURL() string {

@@ -49,11 +49,18 @@ func newHTTPTransport(cfg *Config) (*httpTransport, error) {
 				TLSClientConfig:     tlsCfg,
 				MaxConnsPerHost:     10,
 				MaxIdleConnsPerHost: 5,
+				IdleConnTimeout:     30 * time.Second,
 			},
 		},
 		apiKey: cfg.APIKey,
 		cfg:    cfg,
 	}, nil
+}
+
+// CloseIdleConnections releases pooled keep-alive connections to the
+// UniFi controller. Safe to call more than once.
+func (t *httpTransport) CloseIdleConnections() {
+	t.client.CloseIdleConnections()
 }
 
 func (t *httpTransport) do(ctx context.Context, method, url string, body []byte) ([]byte, int, error) {
