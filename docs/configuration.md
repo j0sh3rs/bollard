@@ -63,7 +63,7 @@ DATABASE_URL=postgres://bollard:secret@postgres:5432/bollard?sslmode=require
 
 - The default `file:bollard.db` is relative to the working directory. The image is `FROM scratch` with no volume, so that file is lost when the container is recreated. Always set an absolute path on a volume (as in the examples) unless you accept losing ownership state.
 - `file::memory:?cache=shared` keeps state in memory only; use it for testing.
-- For Postgres, prefer `sslmode=require` or stricter unless the database is on the same trusted host. The startup log masks the password.
+- For Postgres, prefer `sslmode=require` or stricter unless the database is on the same trusted host. The startup log masks the password, including `password` and `sslpassword` query parameters.
 - Switching backends does not copy data. Follow [Migrate the state store](operations.md#switch-the-state-store).
 - Run one bollard per store and per UniFi site.
 
