@@ -6,6 +6,9 @@ name: ci
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -35,3 +38,9 @@ jobs:
         run: go test -race ./...
       - name: Build
         run: go build ./...
+      - name: Build daemon smoke image
+        run: docker build --build-arg VERSION=v0.0.0-smoke -t bollard:smoke .
+      - name: Smoke test daemon image
+        env:
+          BOLLARD_SMOKE_IMAGE: bollard:smoke
+        run: go test -race . -run '^TestDaemonImageSmoke$' -count=1 -v
