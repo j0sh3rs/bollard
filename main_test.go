@@ -38,6 +38,9 @@ func TestSanitizeDSN(t *testing.T) {
 		{"postgres://h/db", "postgres://h/db"},
 		{"postgresql://u%40x:secret@h/%2A%2A%2A?%70assword=secret&sslpassword=secret&other=%2A%2A%2A&password=secret", "postgresql://u%40x:***@h/%2A%2A%2A?%70assword=***&sslpassword=***&other=%2A%2A%2A&password=***"},
 		{"postgres://h/db?z=%20&a=1", "postgres://h/db?z=%20&a=1"},
+		{"postgres://h/db?password =secret&application_name=worker;blue", "postgres://h/db?password =***&application_name=worker;blue"},
+		{"postgres://h/db? sslpassword=secret", "postgres://h/db? sslpassword=***"},
+		{"postgres://u@h/db?application_name=worker;blue", "postgres://u@h/db?application_name=worker;blue"},
 	}
 	for _, c := range cases {
 		got := sanitizeDSN(c.in)
@@ -165,5 +168,16 @@ func TestRetryableUniFiStartupConnectionErrors(t *testing.T) {
 		if !retryableUniFiStartup(&net.OpError{Op: "dial", Net: "tcp", Err: errno}) {
 			t.Errorf("startup did not retry %v", errno)
 		}
+	}
+}
+
+func TestShutdownSignalPrecedesDockerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !dockerStreamStopped(ctx, context.Canceled) {
+		t.Fatal("daemon treated a signal-driven Docker stream cancellation as a failure")
+	}
+	if dockerStreamStopped(context.Background(), context.Canceled) {
+		t.Fatal("unexpected Docker stream cancellation was hidden from the daemon")
 	}
 }

@@ -237,11 +237,11 @@ func run(adopt bool) int {
 			logger.Info("shutting down")
 			return 0
 		case err := <-errCh:
-			if err != nil {
-				logger.Error("docker event stream error", "err", err)
-				return 1
+			if dockerStreamStopped(ctx, err) {
+				return 0
 			}
-			return 0
+			logger.Error("docker event stream error", "err", err)
+			return 1
 		case e, ok := <-eventCh:
 			if !ok {
 				return 0
@@ -291,6 +291,12 @@ func retryableUniFiStartup(err error) bool {
 		errors.Is(err, syscall.ECONNRESET)
 }
 
+// dockerStreamStopped reports a clean end of the Docker event stream: no error, or the
+// cancellation caused by our own shutdown signal racing the select in run.
+func dockerStreamStopped(ctx context.Context, err error) bool {
+	return err == nil || (ctx.Err() != nil && errors.Is(err, context.Canceled))
+}
+
 type dockerLister struct {
 	client *dockerclient.Client
 }
@@ -312,39 +318,47 @@ func (d *dockerLister) ListRunning(ctx context.Context) (map[string]map[string]s
 // is replaced with "***", as are password and sslpassword query parameters
 // (pgx accepts them). SQLite file paths are returned unchanged.
 func sanitizeDSN(dsn string) string {
-	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+	scheme, rest, ok := strings.Cut(dsn, "://")
+	if !ok || (scheme != "postgres" && scheme != "postgresql") {
 		return dsn
 	}
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return "<unparseable dsn>"
-	}
-	raw := u.RawQuery
-	var query strings.Builder
-	last := 0
-	for offset := 0; offset < len(raw); {
-		param, _, _ := strings.Cut(raw[offset:], "&")
-		name, _, _ := strings.Cut(param, "=")
-		key, err := url.QueryUnescape(name)
-		if err != nil || strings.Contains(param, ";") {
-			return "<unparseable dsn>"
+	// Edit the raw text like pgx's own redaction so every unrelated byte survives.
+	var out strings.Builder
+	out.WriteString(scheme + "://")
+	if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+		user, _, hasPassword := strings.Cut(rest[:i], ":")
+		out.WriteString(user)
+		if hasPassword {
+			out.WriteString(":***")
 		}
-		if key == "password" || key == "sslpassword" {
-			query.WriteString(raw[last:offset])
-			query.WriteString(name)
-			query.WriteString("=***")
-			last = offset + len(param)
+		out.WriteByte('@')
+		rest = rest[i+1:]
+	}
+	path, query, hasQuery := strings.Cut(rest, "?")
+	out.WriteString(path)
+	if !hasQuery {
+		return out.String()
+	}
+	out.WriteByte('?')
+	for i, pair := range strings.Split(query, "&") {
+		if i > 0 {
+			out.WriteByte('&')
 		}
-		offset += len(param) + 1
+		key, _, hasValue := strings.Cut(pair, "=")
+		if hasValue && isDSNSecretKey(key) {
+			out.WriteString(key + "=***")
+		} else {
+			out.WriteString(pair)
+		}
 	}
-	if last != 0 {
-		query.WriteString(raw[last:])
-		u.RawQuery = query.String()
+	return out.String()
+}
+
+// isDSNSecretKey applies pgx's key decoding: literal edge spaces are ignored, then percent escapes.
+func isDSNSecretKey(raw string) bool {
+	key := strings.Trim(raw, " ")
+	if decoded, err := url.PathUnescape(key); err == nil {
+		key = decoded
 	}
-	if u.User != nil {
-		u.User = url.User(u.User.Username())
-		user, rest, _ := strings.Cut(u.String(), "@")
-		return user + ":***@" + rest
-	}
-	return u.String()
+	return key == "password" || key == "sslpassword"
 }

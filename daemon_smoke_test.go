@@ -207,6 +207,10 @@ func TestDaemonImageSmoke(t *testing.T) {
 			t.Errorf("metrics exposition missing %q", want)
 		}
 	}
+	smokeDockerOK(t, "stop", "--time", "10", daemon)
+	if code := smokeDockerOK(t, "inspect", "--format", "{{.State.ExitCode}}", daemon); code != "0" {
+		t.Errorf("daemon exited with %s after SIGTERM, want 0", code)
+	}
 }
 
 func smokeDocker(args ...string) (string, error) {

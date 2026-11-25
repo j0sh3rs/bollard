@@ -27,7 +27,7 @@ func TestTraefikPlugin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	var mu sync.Mutex
-	var policies []map[string]interface{}
+	policies := []map[string]interface{}{}
 	created := make(chan struct{}, 1)
 	mock := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

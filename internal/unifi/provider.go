@@ -150,6 +150,9 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 		if err := json.Unmarshal(data, &page); err != nil {
 			return nil, fmt.Errorf("unifi: parse records: %w", err)
 		}
+		if page.Data == nil {
+			return nil, errors.New("unifi: list records: response has no data")
+		}
 		if page.Count < 0 || page.TotalCount < 0 || (len(page.Data) == 0 && offset < page.TotalCount) {
 			return nil, fmt.Errorf("unifi: invalid records pagination at offset %d", offset)
 		}
@@ -164,6 +167,9 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 			recordType := env.Type
 			if env.Type == policyTypeA {
 				recordType = "A"
+			} else if recordType == "A" {
+				// A wire type literally named "A" is not UniFi's A-record policy.
+				recordType = "UNSUPPORTED_A"
 			}
 			all = append(all, DNSRecord{
 				ID: env.ID, Hostname: env.Domain, IP: env.IPv4Address,
@@ -211,6 +217,9 @@ func (p *modernProvider) DeleteRecord(ctx context.Context, unifiID string) error
 	if err != nil && status != http.StatusNotFound {
 		return fmt.Errorf("unifi: delete record %s: %w", unifiID, err)
 	}
+	if err == nil && status == http.StatusAccepted {
+		return fmt.Errorf("unifi: delete record %s accepted but not completed", unifiID)
+	}
 	return nil
 }
 
@@ -236,6 +245,9 @@ func (p *legacyProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 	var entries []staticDNSEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, fmt.Errorf("unifi: parse legacy records: %w", err)
+	}
+	if entries == nil {
+		return nil, errors.New("unifi: legacy list: response has no records")
 	}
 	var records []DNSRecord
 	for _, e := range entries {
@@ -280,6 +292,9 @@ func (p *legacyProvider) DeleteRecord(ctx context.Context, unifiID string) error
 	_, status, err := p.transport.do(ctx, http.MethodDelete, url, nil)
 	if err != nil && status != http.StatusNotFound {
 		return fmt.Errorf("unifi: legacy delete %s: %w", unifiID, err)
+	}
+	if err == nil && status == http.StatusAccepted {
+		return fmt.Errorf("unifi: legacy delete %s accepted but not completed", unifiID)
 	}
 	return nil
 }

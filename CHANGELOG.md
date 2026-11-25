@@ -8,6 +8,7 @@
 * Exclude local credentials and Git history from container build contexts.
 * Retry failed DNS deletion during reconciliation, keep one owner per hostname during adoption, and release idle UniFi connections on shutdown and initialization failure.
 * Validate hostnames and preserve records already occupying them. Adoption skips disabled, non-A, and ambiguous records.
+* Reject UniFi list responses without a record list, treat HTTP 202 deletes as unfinished, and never adopt a policy whose wire type is literally `A`.
 * Retry transient UniFi startup failures and probe health on host-qualified metrics addresses.
 * Serialize Traefik plugin writes within a shared runtime. Separate plugin aliases and replicas still need one configured writer per site/domain scope.
 
