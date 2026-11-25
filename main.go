@@ -217,7 +217,8 @@ func (d *dockerLister) ListRunning(ctx context.Context) (map[string]map[string]s
 
 // sanitizeDSN strips credentials from a DSN for safe logging.
 // Postgres URIs have the form postgres://user:pass@host/db — the password
-// is replaced with "***". SQLite file paths are returned unchanged.
+// is replaced with "***", as are password and sslpassword query parameters
+// (pgx accepts them). SQLite file paths are returned unchanged.
 func sanitizeDSN(dsn string) string {
 	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
 		return dsn
@@ -228,6 +229,15 @@ func sanitizeDSN(dsn string) string {
 	}
 	if u.User != nil {
 		u.User = url.UserPassword(u.User.Username(), "***")
+	}
+	q := u.Query()
+	if v, ok := q["password"]; ok && len(v) > 0 {
+		q.Set("password", "***")
+		u.RawQuery = q.Encode()
+	}
+	if v, ok := q["sslpassword"]; ok && len(v) > 0 {
+		q.Set("sslpassword", "***")
+		u.RawQuery = q.Encode()
 	}
 	return u.String()
 }
