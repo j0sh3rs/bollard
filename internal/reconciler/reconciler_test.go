@@ -402,3 +402,84 @@ func TestHandleStop_SkipsDeleteWhenRecordSharedWithRunning(t *testing.T) {
 		t.Error("expected shared unifi record untouched")
 	}
 }
+
+func TestAdopt_DuplicateHostnameSkipsSecond(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-web"] = unifi.DNSRecord{
+		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1",
+	}
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
+		"container-b": {"dns.bollard/hostname": "web.home.arpa"},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if len(s.records) != 1 {
+		t.Fatalf("expected exactly 1 store row, got %d", len(s.records))
+	}
+	for _, rec := range s.records {
+		if rec.UnifiRecordID != "unifi-web" {
+			t.Errorf("expected adopted row to point at unifi-web, got %s", rec.UnifiRecordID)
+		}
+	}
+}
+
+func TestAdopt_DuplicateHostnameDifferentIP(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-web"] = unifi.DNSRecord{
+		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1",
+	}
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
+		// Different IP: no matching record, so container-b goes through the
+		// start path.
+		"container-b": {"dns.bollard/hostname": "web.home.arpa", "dns.bollard/ip-override": "10.0.0.5"},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt must be non-fatal on conflict: %v", err)
+	}
+	rec, _ := s.GetByContainerID(context.Background(), "container-a")
+	if rec == nil || rec.UnifiRecordID != "unifi-web" {
+		t.Fatal("expected container-a to adopt unifi-web")
+	}
+	// The regression this plan fixes: no two store rows may share a
+	// UnifiRecordID. Depending on map iteration order, container-b is
+	// rejected with a hostname conflict (1 row) or creates its own record
+	// first (2 rows with distinct record IDs).
+	seen := map[string]struct{}{}
+	for _, r := range s.records {
+		if _, dup := seen[r.UnifiRecordID]; dup {
+			t.Fatalf("store has two rows pointing at record %s", r.UnifiRecordID)
+		}
+		seen[r.UnifiRecordID] = struct{}{}
+	}
+}
+
+func TestAdopt_NoDuplicateSingleContainer(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-only"] = unifi.DNSRecord{
+		ID: "unifi-only", Hostname: "only.home.arpa", IP: "192.168.1.1",
+	}
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-1": {"dns.bollard/hostname": "only.home.arpa"},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if len(s.records) != 1 {
+		t.Fatalf("expected 1 store row, got %d", len(s.records))
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-1"); rec == nil || rec.UnifiRecordID != "unifi-only" {
+		t.Fatal("expected container-1 to adopt unifi-only")
+	}
+}

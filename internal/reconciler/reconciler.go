@@ -333,6 +333,17 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 	for _, ur := range unifiRecords {
 		unifiByKey[key{ur.Hostname, ur.IP}] = ur
 	}
+
+	// Hostnames already owned by any store row before this run; a second
+	// adopt for the same hostname is a conflict, not an overwrite.
+	ownedHostnames := map[string]struct{}{}
+	all, err := r.store.ListAll(ctx)
+	if err != nil {
+		return fmt.Errorf("adopt: list store: %w", err)
+	}
+	for _, rec := range all {
+		ownedHostnames[rec.Hostname] = struct{}{}
+	}
 	for containerID, labels := range running {
 		spec, err := docker.ParseLabels(labels)
 		if err != nil || spec == nil || !spec.Enabled {
@@ -351,6 +362,13 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 		unifiRec, found := unifiByKey[k]
 		now := time.Now().UTC()
 		if found {
+			if _, owned := ownedHostnames[spec.Hostname]; owned {
+				r.log.Warn("adopt: hostname already owned, skipping", "hostname", spec.Hostname, "container", containerID)
+				if r.metrics != nil {
+					r.metrics.HostnameConflictsTotal.Inc()
+				}
+				continue
+			}
 			if err := r.store.Create(ctx, store.Record{
 				ID: uuid.New().String(), ContainerID: containerID,
 				Hostname: spec.Hostname, IP: ip, RecordType: spec.RecordType,
@@ -360,6 +378,7 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 				r.log.Error("adopt: store create failed", "container", containerID, "err", err)
 				continue
 			}
+			ownedHostnames[spec.Hostname] = struct{}{}
 			if r.metrics != nil {
 				r.metrics.RecordsTotal.WithLabelValues("adopted", "true").Inc()
 			}
