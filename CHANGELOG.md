@@ -18,6 +18,20 @@
 * Stamp the build version in release binaries and images; expose it with `-version`.
 * Build and smoke-test the daemon image in CI against Docker and a simulated UniFi API.
 
+## [0.7.2](https://github.com/j0sh3rs/bollard/compare/v0.7.1...v0.7.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* release DNS ownership, daemon operations, and delivery hardening ([#34](https://github.com/j0sh3rs/bollard/issues/34)) ([d2a0687](https://github.com/j0sh3rs/bollard/commit/d2a0687661d112de39229dc5527bd3350d4ce435))
+
+
+### Chores
+
+* **deps:** Update all dependencies ([#32](https://github.com/j0sh3rs/bollard/issues/32)) ([d3dccda](https://github.com/j0sh3rs/bollard/commit/d3dccda4177198d05782e123cb7cf9d11e713d55))
+* **deps:** Update golang:1.27-alpine Docker digest to 70bd7dd ([#30](https://github.com/j0sh3rs/bollard/issues/30)) ([99b2fbf](https://github.com/j0sh3rs/bollard/commit/99b2fbf4e70477ab2b6f9e9bbe6a5aa01b421fe5))
+* **deps:** Update postgres Docker tag to v19 ([#33](https://github.com/j0sh3rs/bollard/issues/33)) ([e07c17c](https://github.com/j0sh3rs/bollard/commit/e07c17c331d3fe91cdf2db0490808ba098ba5f54))
+
 ## [0.7.1](https://github.com/j0sh3rs/bollard/compare/v0.7.0...v0.7.1) (2026-11-16)
 
 
