@@ -24,8 +24,13 @@ Log messages you should recognise (abridged):
 | `reconcile failed` | Store or UniFi listing failed this tick |
 | `failed to delete unifi record` | UniFi delete failed during a stop; the store row is kept and retried on the next reconcile tick |
 | `reconcile: deleted record for stopped container` | A record whose container is gone was deleted automatically (missed stop or failed delete) |
+| `metrics server listening` / `metrics listen failed` | The `/metrics` and `/healthz` listener started, or `METRICS_ADDR` could not be bound (the process exits non-zero) |
+| `UniFi unavailable; retrying` | A transient startup failure (connection refused or reset, timeout, 429, 5xx). The delay doubles from 500 ms to 30 s and the process keeps retrying |
+| `unifi client init error` | A permanent startup failure: bad key, invalid certificate, or unknown site. The process exits non-zero |
+| `docker event stream error` | The Docker event stream failed at runtime. The process exits non-zero and the restart policy reconnects |
+| `shutting down` | SIGTERM or SIGINT received. The process exits 0 |
 
-If the controller is temporarily unavailable, bollard retries with backoff. `bollard_up` remains `0` during startup even if `/healthz` returns 200. Configuration, site, and authentication errors exit non-zero; read the last log line before the exit.
+While the controller is merely unreachable, bollard logs `UniFi unavailable; retrying` and keeps trying until it recovers or you stop it. `bollard_up` stays `0` during that time even though `/healthz` returns 200. Configuration, site, authentication, and certificate errors exit non-zero; read the last log line before the exit. See [UniFi error messages](#unifi-error-messages).
 
 ## Adopt existing records
 
@@ -119,6 +124,35 @@ Read the [CHANGELOG](../CHANGELOG.md) first for minor and major versions. Embedd
 ## Rotate the UniFi API key
 
 Create a new key in UniFi, update `UNIFI_API_KEY`, run `docker compose up -d bollard` (environment changes need a recreate), then delete the old key.
+
+## Stop and restart
+
+bollard handles `SIGTERM` (`docker stop`) and `SIGINT`, stops the event loop, closes the store and idle UniFi connections, and exits `0`. This also applies while it is still retrying the controller at startup. Stopping never deletes DNS records; records for stopped containers are deleted only when bollard is running to see the stop, or on the next reconcile after it restarts.
+
+Any other exit is non-zero, so `restart: unless-stopped` restarts it. Environment changes need a container recreate (`docker compose up -d bollard`), not a restart.
+
+## UniFi error messages
+
+| Message | Cause | Action |
+|---|---|---|
+| `unifi: list records: response has no data` | The controller answered a record listing with no record list (`data` missing or `null`). bollard treats that as an error, not as an empty zone, because an empty answer would otherwise look like "nothing exists" and allow duplicate creates. A genuinely empty zone returns an empty list | Check the controller version and logs. If an otherwise healthy controller always answers this way, open an issue with the response body, redacting the API key |
+| `unifi: delete record <id> accepted but not completed` (also `legacy delete`) | The controller returned HTTP 202 for a delete, which means it was queued, not applied. The ownership row is kept and the delete is retried on the next reconcile | Usually clears by itself. If it repeats, check in UniFi whether the record is still present |
+| `unifi: site probe failed (status=N)` | The first request to the controller failed. 401/403 means a bad or under-privileged key | See [Getting started](getting-started.md#troubleshooting) |
+| `unifi: create returned no record ID` | The controller accepted a create but did not report an ID, so bollard cannot track it | Check UniFi for the record and remove it if it is a stray duplicate |
+
+## Verify a release
+
+Release images are built for `linux/amd64` and `linux/arm64`, carry provenance and an SBOM, and are signed with keyless Cosign from the release workflow. Release binaries and an SPDX SBOM are attached to each GitHub release with a `CHECKSUMS.sha256` file.
+
+```bash
+cosign verify ghcr.io/j0sh3rs/bollard:<tag> \
+  --certificate-identity-regexp '^https://github.com/j0sh3rs/bollard/\.github/workflows/release-please\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+sha256sum -c CHECKSUMS.sha256   # after downloading the binaries and checksum file
+```
+
+The running version appears in the `bollard starting` log line and in `bollard_build_info`. Builds that include the `-version` flag also print it with `/bollard -version`.
 
 ## Verify metrics
 

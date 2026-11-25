@@ -144,6 +144,10 @@ If the first sites request returns 404, 405, or 501, the client falls back to th
 
 Any other site-probe failure is an error and does not fall back.
 
+### Response handling
+
+The plugin only lists and creates, so it never sends `DELETE`. In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`).
+
 ## Limits
 
 | Property | Value |

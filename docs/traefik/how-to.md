@@ -186,6 +186,8 @@ Read `docker compose logs traefik`. Bollard lines start with `bollard[<name>]:`.
 | `x509: ...` | Controller certificate not trusted, or IP missing from its SANs | [Private CA](#verify-the-controller-with-a-private-ca). |
 | `unifi: read CA cert` or `no valid certs` | CA path missing or not PEM. Found only on first connection. | Fix the mount and path. |
 | `create DNS record for <host>: ...` | UniFi rejected the create (for example a duplicate) | Read the UniFi message. The create is retried every poll. |
+| `unifi: list records: response has no data` | The controller returned no record list, so the plugin refuses to guess that the zone is empty | Retried each poll; nothing is created meanwhile. Check the controller version and logs; if a healthy controller always answers this way, open an issue |
+| `unifi: create returned no record ID` | UniFi accepted a create but did not return an ID | Check UniFi for the record; the next poll sees it and skips the name |
 | `DNS conflict for <host>: existing record preserved` | A record with a different IP holds the name | Edit or delete it in UniFi. The plugin never will. Repeats every poll. |
 | Controller URL by name fails to resolve | Bollard cannot bootstrap DNS for its own controller | Use a reachable IP or a name resolved elsewhere. |
 

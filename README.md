@@ -66,7 +66,7 @@ Use your actual site display name or UUID on the modern API; legacy controllers 
 ```yaml
 services:
   bollard:
-    image: ghcr.io/j0sh3rs/bollard:v0.7.0
+    image: ghcr.io/j0sh3rs/bollard:v0.7.1
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -106,16 +106,19 @@ The standalone controller historically defaults to skipping UniFi TLS verificati
 | Inspect standalone metrics and endpoint limits | [Monitoring](docs/monitoring.md) |
 | Adapt a deployment example | [Examples](docs/examples/) |
 | Check release history or future work | [Changelog](CHANGELOG.md), [roadmap](docs/ROADMAP.md) |
+| Contribute or report a security issue | [Contributing](CONTRIBUTING.md), [Security](SECURITY.md) |
 
 ## Development checks
 
 With the Go toolchain required by `go.mod`:
 
 ```sh
-go test -race . ./internal/unifi ./traefik
+go test -race ./...
 TRAEFIK_IMAGE=traefik:v3.7.19 go test -race ./traefik -run TestTraefikPlugin -v -count=1
+docker build --build-arg VERSION=v0.0.0-smoke -t bollard:smoke .
+BOLLARD_SMOKE_IMAGE=bollard:smoke go test -race . -run '^TestDaemonImageSmoke$' -count=1 -v
 ```
 
-The second command requires Docker. It loads the plugin in real Traefik, uses a mock UniFi controller, and verifies DNS creation and backend routing without contacting your live controller. Full CI also exercises the standalone packages and PostgreSQL tests with its configured database.
+The Docker-backed tests skip when their environment variable is unset. The Traefik test loads the plugin in real Traefik against a mock UniFi controller. The image smoke test runs the built image against an isolated Docker daemon and a simulated UniFi API. Set `TEST_POSTGRES_DSN` to include the PostgreSQL store tests. Neither test contacts your real controller. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 Bollard does not configure client resolvers, replace authoritative DNS, or issue application TLS certificates. Those remain operator responsibilities.

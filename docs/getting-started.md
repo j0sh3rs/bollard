@@ -115,7 +115,7 @@ Stop the container and the log shows `deleted DNS record`; the record leaves Uni
 
 ## Troubleshooting
 
-bollard exits non-zero on configuration, store, UniFi probe, or Docker socket errors; `restart: unless-stopped` retries.
+bollard exits non-zero on configuration, store, permanent UniFi (credentials, certificate, site), or Docker socket errors; `restart: unless-stopped` retries. If the controller is only unreachable, bollard logs `UniFi unavailable; retrying` and keeps trying without exiting.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -128,5 +128,8 @@ bollard exits non-zero on configuration, store, UniFi probe, or Docker socket er
 | `invalid labels on container` | Bad TTL, record type, IP, or enabled value | See [labels](configuration.md#container-labels) |
 | `multiple routable IPv4 addresses found` | Ambiguous host IP | Set `dns.bollard/ip-override` |
 | `hostname ... already owned by container` | Two containers claim one hostname | Make hostnames unique |
+| `UniFi unavailable; retrying` repeats | Controller unreachable, wrong `UNIFI_HOST`, or a blocked port | Not fatal. Check the URL and network path from the host |
+| `metrics listen failed` | `METRICS_ADDR` is already in use or not bindable | Pick another port or address |
+| `response has no data` or `accepted but not completed` | UniFi answered unexpectedly | See [UniFi error messages](operations.md#unifi-error-messages) |
 
 Set `LOG_LEVEL=debug` for extra detail. For day-two tasks, see [Operations](operations.md).

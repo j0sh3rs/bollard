@@ -116,6 +116,15 @@ rate(bollard_docker_event_errors_total[5m])
 - `bollard_unifi_request_duration_seconds{method}` times each attempt, excluding backoff between attempts.
 - `bollard_unifi_api_version{provider}` is `1` for the selected `modern` or `legacy` provider.
 
+Use these to see controller trouble before records drift:
+
+```promql
+sum by (status) (rate(bollard_unifi_requests_total{status!~"2.."}[5m]))
+histogram_quantile(0.99, sum by (le) (rate(bollard_unifi_request_duration_seconds_bucket[5m])))
+```
+
+Expect a few 404, 405, or 501 responses at startup while bollard probes the modern API before falling back to legacy, and 429 or 5xx responses are retried, so a nonzero rate is not always an outage.
+
 ### Process
 
 #### `bollard_build_info`
@@ -203,6 +212,8 @@ For the Prometheus Operator, put the same `groups` under `spec:` of a `Prometheu
 | Reconcile p99 | Time series | `histogram_quantile(0.99, rate(bollard_reconcile_duration_seconds_bucket[15m]))` |
 | Reconcile failures / min | Time series | `rate(bollard_reconcile_iterations_total{status="failure"}[15m]) * 60` |
 | Event errors / min | Time series | `rate(bollard_docker_event_errors_total[5m]) * 60` |
+| UniFi errors / s | Time series | `sum by (status) (rate(bollard_unifi_requests_total{status!~"2.."}[5m]))` |
+| UniFi p99 latency | Time series | `histogram_quantile(0.99, sum by (le) (rate(bollard_unifi_request_duration_seconds_bucket[5m])))` |
 
 ## Scraping
 

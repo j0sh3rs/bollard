@@ -102,6 +102,9 @@ So adopt can create records; it never deletes any. See [Operations](operations.m
 - 15 s request timeout, up to 3 attempts, exponential backoff from 500 ms capped at 10 s with jitter. HTTP 429 retries for any method. 5xx retries for GET and DELETE only. POST is not retried on 5xx, so a failed create waits for the next event or reconcile tick.
 - Redirects are not followed.
 - API selection lasts for the lifetime of the daemon or plugin provider. Restart after a controller API upgrade to probe again.
+- List responses must contain a record list. A missing or `null` list is an error, not an empty zone, so a malformed answer cannot make existing names look free.
+- A modern or legacy `DELETE` that returns 404 counts as success. HTTP 202 is an error (`accepted but not completed`) because the delete may not have been applied; the ownership row is kept for retry.
+- The daemon records one request counter and one latency observation per attempt (see [Monitoring](monitoring.md#unifi-api)). The plugin does not export metrics.
 
 ## IP resolution
 
@@ -111,6 +114,11 @@ An `ip-override` label wins. Otherwise the resolver inspects the **host's** netw
 - requires **exactly one** remaining IPv4 address. Zero or more than one is an error and the record is not created; set `dns.bollard/ip-override` or fix the interfaces.
 
 It does not inspect the container's own networks. Restart bollard if the host IP changes.
+
+## Shutdown
+
+`SIGTERM` or `SIGINT` cancels the main context. The event loop stops, `bollard_up` returns to `0`, the store and idle UniFi connections are closed, and the process exits `0`. Shutdown never deletes DNS records. A signal during the startup retry loop also exits `0`.
+
 
 ## Failure behaviour
 
