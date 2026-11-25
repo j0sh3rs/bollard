@@ -5,6 +5,13 @@
     ".": {
       "release-type": "go",
       "include-v-in-tag": true,
+      "extra-files": [
+        "README.md",
+        "docs/traefik/reference.md",
+        "docs/traefik/tutorial.md",
+        "docs/examples/traefik-plugin/compose.yaml",
+        "docs/examples/traefik-plugin/env.example"
+      ],
       "changelog-sections": [
         { "type": "feat", "section": "Features" },
         { "type": "fix", "section": "Bug Fixes" },

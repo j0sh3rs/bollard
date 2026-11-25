@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fixture is a stateful Traefik + modern UniFi API. Both list endpoints are paginated one item
@@ -28,6 +29,10 @@ type fixture struct {
 	requests []string         // "METHOD path" for UniFi calls
 	posts    []map[string]any // every POST body received
 	failPost map[string]bool  // domain -> respond 500 to POST
+	failDel  map[string]bool  // record id -> respond 500 to DELETE
+	hold     chan struct{}    // if set, next POST commits then waits for this channel before responding
+	blockDel map[string]bool  // record id -> DELETE hangs until the client cancels
+	held     chan struct{}    // closed when a POST is being held
 	nextID   int
 }
 
@@ -105,10 +110,36 @@ func (f *fixture) handle(w http.ResponseWriter, r *http.Request) {
 			f.nextID++
 			policy["id"] = fmt.Sprintf("id-%d", f.nextID)
 			f.records = append(f.records, policy)
+			if hold := f.hold; hold != nil { // committed; delay the response
+				f.hold = nil
+				f.mu.Unlock()
+				close(f.held)
+				<-hold
+				f.mu.Lock()
+			}
 			json.NewEncoder(w).Encode(policy)
 		default:
 			w.WriteHeader(405)
 		}
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/proxy/network/integration/v1/sites/site-id/dns/policies/"):
+		id := strings.TrimPrefix(r.URL.Path, "/proxy/network/integration/v1/sites/site-id/dns/policies/")
+		if f.blockDel[id] { // hang until the client gives up
+			f.mu.Unlock()
+			<-r.Context().Done()
+			f.mu.Lock()
+			return
+		}
+		if f.failDel[id] {
+			w.WriteHeader(500)
+			return
+		}
+		for i, rec := range f.records {
+			if rec["id"] == id {
+				f.records = append(f.records[:i], f.records[i+1:]...)
+				break
+			}
+		}
+		w.WriteHeader(200)
 	default:
 		f.t.Errorf("unexpected API request %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(404)
@@ -307,4 +338,113 @@ func TestReconcileTargetIPChangeDoesNotOverwrite(t *testing.T) {
 	assertEq(t, "posted", f.postedDomains(), []string{"b.home.arpa"})
 	assertEq(t, "state", f.state(), []string{"a.home.arpa=192.0.2.10", "b.home.arpa=192.0.2.20"})
 	f.assertNoDestructive()
+}
+
+// Stop deletes exactly the records this instance created. Pre-existing and other-writer records stay.
+func TestStopDeletesOnlyRecordsCreatedByThisInstance(t *testing.T) {
+	f := newFixture(t)
+	f.setRouters("old.home.arpa")
+	f.reconcile(f.provider("192.0.2.99")) // earlier run / other writer
+
+	p := f.provider("192.0.2.10")
+	f.setRouters("old.home.arpa", "a.home.arpa", "b.home.arpa")
+	f.reconcile(p)
+	assertEq(t, "state before stop", f.state(), []string{"a.home.arpa=192.0.2.10", "b.home.arpa=192.0.2.10", "old.home.arpa=192.0.2.99"})
+
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	assertEq(t, "state after stop", f.state(), []string{"old.home.arpa=192.0.2.99"})
+	f.mu.Lock()
+	deletes := 0
+	for _, r := range f.requests {
+		if strings.HasPrefix(r, http.MethodDelete+" ") {
+			deletes++
+		}
+	}
+	f.mu.Unlock()
+	if deletes != 2 {
+		t.Fatalf("DELETE calls = %d, want 2", deletes)
+	}
+}
+
+// A failed delete is logged and does not stop cleanup of the remaining records.
+func TestStopContinuesAfterFailedDelete(t *testing.T) {
+	f := newFixture(t)
+	p := f.provider("192.0.2.10")
+	f.setRouters("a.home.arpa", "b.home.arpa", "c.home.arpa")
+	f.reconcile(p)
+	f.mu.Lock()
+	f.failDel = map[string]bool{"id-1": true}
+	f.mu.Unlock()
+
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	assertEq(t, "state after stop", f.state(), []string{"a.home.arpa=192.0.2.10"})
+}
+
+// Stop cancels an in-flight create whose POST UniFi already committed. The response (and ID) must
+// still be collected so the record is deleted, not orphaned.
+func TestStopDrainsInFlightCreateBeforeCleanup(t *testing.T) {
+	f := newFixture(t)
+	f.setRouters("a.home.arpa", "b.home.arpa")
+	f.mu.Lock()
+	f.hold, f.held = make(chan struct{}), make(chan struct{})
+	hold, held := f.hold, f.held
+	f.mu.Unlock()
+	p := f.provider("192.0.2.10")
+	if err := p.Provide(make(chan json.Marshaler, 1)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-held:
+	case <-time.After(3 * time.Second):
+		t.Fatal("POST never reached UniFi")
+	}
+	// Signal after Stop calls the real cancel, so the held POST is released only once the worker is cancelled.
+	cancelled := make(chan struct{})
+	p.mu.Lock()
+	orig := p.cancel
+	p.cancel = func() { orig(); close(cancelled) }
+	p.mu.Unlock()
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.Stop() }()
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop never cancelled the worker")
+	}
+	close(hold)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(9 * time.Second):
+		t.Fatal("Stop exceeded Traefik's 10s close budget")
+	}
+	assertEq(t, "state after stop", f.state(), []string{})
+	// If Stop had not cancelled the worker first, it would have moved on and posted b.home.arpa.
+	assertEq(t, "posted", f.postedDomains(), []string{"a.home.arpa"})
+}
+
+// One hung DELETE must not consume the whole shutdown budget; later records still reach UniFi.
+func TestStopHungDeleteDoesNotStarveOthers(t *testing.T) {
+	f := newFixture(t)
+	p := f.provider("192.0.2.10")
+	f.setRouters("a.home.arpa", "b.home.arpa", "c.home.arpa")
+	f.reconcile(p)
+	f.mu.Lock()
+	f.blockDel = map[string]bool{"id-1": true}
+	f.mu.Unlock()
+
+	start := time.Now()
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > cleanupTimeout {
+		t.Fatalf("Stop took %v, want within %v", d, cleanupTimeout)
+	}
+	assertEq(t, "state after stop", f.state(), []string{"a.home.arpa=192.0.2.10"})
 }
