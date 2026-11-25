@@ -22,7 +22,8 @@ Log messages you should recognise (abridged):
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
 | `orphaned store record, cleaning up` | A store row pointed at a UniFi record that no longer exists; row removed |
 | `reconcile failed` | Store or UniFi listing failed this tick |
-| `failed to delete unifi record` | UniFi delete failed after the store row was removed |
+| `failed to delete unifi record` | UniFi delete failed during a stop; the store row is kept and retried on the next reconcile tick |
+| `reconcile: deleted record for stopped container` | A record whose container is gone was deleted automatically (missed stop or failed delete) |
 
 Startup failures exit non-zero and Docker restarts the container; read the last log line before the exit.
 
@@ -50,7 +51,9 @@ Adopt does not touch records for containers that are no longer running; see the 
 
 ## Clean up stale records
 
-bollard deletes a record only when it sees the container's `die`/`destroy` event. If a container stopped while bollard was down, or an event was lost, reconcile will **not** remove the record. Find and remove them manually:
+bollard handles the common cases automatically: if the store still has a row for the container (stopped while bollard was down, lost `die` event, or a failed stop delete), the next reconcile tick deletes the record and logs `reconcile: deleted record for stopped container`. Manual cleanup remains only for records with **no** store row — for example after the store was reset or lost without running `--adopt`, or records created by other tools.
+
+For the no-row case, list the records and compare against running containers:
 
 ```bash
 # SQLite: owned records
@@ -61,11 +64,11 @@ psql "$DATABASE_URL" -c "SELECT hostname, ip, unifi_record_id FROM records ORDER
 docker ps --filter label=dns.bollard/hostname --format '{{.Names}}'
 ```
 
-Compare the two lists. For each hostname with no running container, delete the record in the UniFi DNS settings. On the next reconcile tick bollard notices the UniFi record is gone and removes the store row (`orphaned store record, cleaning up`). You do not need to edit the store.
+Compare the two lists. For each hostname with no running container and no store row, delete the record in the UniFi DNS settings.
 
 If bollard is offline and you want records gone, delete them in UniFi; bollard cleans its store when it next runs.
 
-Records for stopped containers that you never delete stay in UniFi. Do not reset the store as a shortcut: with the store empty, bollard no longer knows those records are its own.
+Records for stopped containers with no store row stay in UniFi until deleted. Do not reset the store as a shortcut: with the store empty, bollard no longer knows those records are its own.
 
 ## Back up and restore the store
 
@@ -99,7 +102,7 @@ There is no data copy between backends. To move from SQLite to Postgres (or back
 4. Check `state store ready owned_records=N` matches your running labelled containers.
 5. Remove `--adopt`.
 
-Records for containers that are no longer running are not adopted and will remain in UniFi untracked; clean them up as above before switching.
+Records for containers that are no longer running are not adopted; with no store row, reconcile will not delete them — clean them up as above before switching.
 
 ## Upgrade
 

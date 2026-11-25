@@ -54,17 +54,18 @@ The first reconcile runs one `RECONCILE_INTERVAL` after startup, not immediately
 ### Container stop
 
 1. Docker emits `die` or `destroy`; the watcher reports both as `stop`. (`docker stop` produces `die`.)
-2. The store row is deleted by container ID. No row means no-op.
-3. The UniFi record is deleted by its stored ID. A 404 from UniFi counts as success. Any other failure is logged and returned. The store row is already gone at that point, so a failed delete leaves an orphan in UniFi that the daemon no longer tracks. Delete it by hand or restore the store and run `--adopt`.
+2. The store row is looked up by container ID. No row means no-op.
+3. The UniFi record is deleted by its stored ID. A 404 from UniFi counts as success. If this fails, the store row is **kept** and the error is logged and returned — the next reconcile tick retries the delete. After the record is gone, the store row is deleted; if that store write fails, orphan cleanup removes the row on the next tick.
 
 ### Periodic reconcile
 
-One tick does two things:
+One tick does three things:
 
 1. **Store orphan cleanup.** Store rows whose `unifi_record_id` no longer exists in UniFi are removed from the store (counted in `bollard_reconcile_orphans_cleaned_total`). This reacts to records deleted in UniFi. It does **not** delete UniFi records.
-2. **Missed-event recovery.** Running, enabled, labelled containers with no store row go through the normal start path (counted in `bollard_reconcile_missed_recovered_total`). A failure here is logged and does not fail the tick.
+2. **Retry deletes.** Records whose container is no longer running are deleted — a stop delete that failed (the store row was kept) or a missed `die`/`destroy` event — and the store row is removed. A record still referenced by a running row is never deleted.
+3. **Missed-event recovery.** Running, enabled, labelled containers with no store row go through the normal start path (counted in `bollard_reconcile_missed_recovered_total`). A failure here is logged and does not fail the tick.
 
-Reconcile never deletes a UniFi record, and it does not notice containers that stopped while bollard was down or that exited without a `die` event. Those records stay in UniFi and the store until removed manually. See [Operations](operations.md#clean-up-stale-records).
+Reconcile deletes UniFi records only for store rows it owns whose container is no longer running — the retry of a failed stop delete and the cleanup of records left behind by a missed event. It never touches records without a store row. See [Operations](operations.md#clean-up-stale-records).
 
 `ListRecords` returns enabled A records only on `main`, so a record disabled in UniFi looks missing and its store row is dropped on the next tick.
 
