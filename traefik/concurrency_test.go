@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -14,31 +16,29 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
-)
 
-// Two plugin instances (two Providers, as when Traefik runs two replicas or two plugin
-// entries) share no state. Each one lists the zone, then creates what is missing. UniFi has no
-// known atomic create-if-absent, so the only cross-instance protection is whatever the server
-// does on a duplicate POST. These tests pin that boundary; they do not add any guarantee.
+	"github.com/j0sh3rs/bollard/internal/unifi"
+)
 
 const (
 	raceHost    = "app.home.arpa"
-	raceBarrier = 5 * time.Second  // max wait for the second provider to list
-	raceTimeout = 15 * time.Second // hard bound for every reconcile in this file
+	raceBarrier = 5 * time.Second
+	raceTimeout = 15 * time.Second
 )
 
-// raceKeys maps each provider's API key (which identifies the caller) to its target address.
+// raceKeys maps each writer's API key to its target address.
 var raceKeys = map[string]string{"key-a": "192.0.2.10", "key-b": "192.0.2.20"}
 
-// raceAPI is a Traefik + modern UniFi API with one enabled Host router. Every DNS-policy list
-// response is held until both providers have taken their snapshot, so neither can POST before
-// both have seen the zone empty. No sleeps: the barrier is a channel closed by the second list.
+// raceAPI captures a plugin and a remote writer's empty snapshots, then lets the remote
+// writer POST first. The remote writer bypasses the plugin's process-local guard.
 type raceAPI struct {
 	t               *testing.T
 	srv             *httptest.Server
 	allowDuplicates bool          // false: a POST for an existing domain gets 409
 	release         chan struct{} // closed once both callers have listed
+	remoteDone      chan struct{} // closed after the simulated remote writer POSTs
 
 	mu       sync.Mutex
 	callers  map[string]int // API key -> remote record count in its first list snapshot
@@ -54,7 +54,10 @@ type racePost struct {
 }
 
 func newRaceAPI(t *testing.T, allowDuplicates bool) *raceAPI {
-	a := &raceAPI{t: t, allowDuplicates: allowDuplicates, release: make(chan struct{}), callers: map[string]int{}}
+	a := &raceAPI{
+		t: t, allowDuplicates: allowDuplicates, release: make(chan struct{}),
+		remoteDone: make(chan struct{}), callers: map[string]int{},
+	}
 	a.srv = httptest.NewServer(http.HandlerFunc(a.handle))
 	t.Cleanup(a.srv.Close)
 	return a
@@ -113,7 +116,7 @@ func (a *raceAPI) list(w http.ResponseWriter, r *http.Request, caller string) {
 	case <-r.Context().Done():
 		return
 	case <-time.After(raceBarrier):
-		a.t.Errorf("barrier: %s listed but the other provider never did", caller)
+		a.t.Errorf("barrier: %s listed but the other writer never did", caller)
 		w.WriteHeader(http.StatusRequestTimeout) // 4xx: the client does not retry, so failure stays fast
 		return
 	}
@@ -127,12 +130,19 @@ func (a *raceAPI) create(w http.ResponseWriter, r *http.Request, caller string) 
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if caller == "key-a" {
+		select {
+		case <-a.remoteDone:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	select {
 	case <-a.release:
 	default:
-		a.t.Errorf("%s POSTed before both providers listed", caller)
+		a.t.Errorf("%s POSTed before both writers listed", caller)
 	}
 	post := racePost{caller: caller, policy: maps.Clone(policy), status: http.StatusOK}
 	if !a.allowDuplicates && slices.ContainsFunc(a.records, func(rec map[string]any) bool { return rec["domain"] == policy["domain"] }) {
@@ -188,36 +198,50 @@ func raceContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), raceTimeout)
 }
 
-// reconcileTogether runs one reconcile per provider at the same time and waits for both.
-// The context bounds every request, so a stuck barrier fails the test instead of hanging it.
-func reconcileTogether(ctx context.Context, t *testing.T, providers ...*Provider) {
-	t.Helper()
-	errs := make([]error, len(providers))
-	var wg sync.WaitGroup
-	for i, p := range providers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = p.reconcile(ctx)
-		}()
+func (a *raceAPI) reconcileAgainstRemote(ctx context.Context, p *Provider) {
+	a.t.Helper()
+	remote := make(chan error, 1)
+	go func() { remote <- a.remoteCreate(ctx) }()
+	err := p.reconcile(ctx)
+	if remoteErr := <-remote; remoteErr != nil {
+		a.t.Fatalf("remote writer: %v", remoteErr)
 	}
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("provider %d reconcile: %v", i, err)
-		}
+	if err != nil {
+		a.t.Fatalf("plugin reconcile: %v", err)
 	}
 }
 
-// assertResyncIsQuiet runs each provider once more, one after the other: no POST, no change to
+func (a *raceAPI) remoteCreate(ctx context.Context) error {
+	defer close(a.remoteDone)
+	dns, err := unifi.New(ctx, &unifi.Config{
+		Host: a.srv.URL, APIKey: "key-b", Site: "site-id", IncludeAllRecords: true,
+	})
+	if err != nil {
+		return err
+	}
+	if closer, ok := dns.(interface{ CloseIdleConnections() }); ok {
+		defer closer.CloseIdleConnections()
+	}
+	records, err := dns.ListRecords(ctx)
+	if err != nil {
+		return err
+	}
+	if len(records) != 0 {
+		return fmt.Errorf("expected an empty snapshot, got %v", records)
+	}
+	_, err = dns.CreateRecord(ctx, unifi.DNSRecord{
+		Hostname: raceHost, IP: raceKeys["key-b"], RecordType: "A", TTL: 300,
+	})
+	return err
+}
+
+// assertResyncIsQuiet runs the provider once more: no POST, no change to
 // the remote records, no destructive call.
-func assertResyncIsQuiet(ctx context.Context, t *testing.T, a *raceAPI, providers ...*Provider) {
+func assertResyncIsQuiet(ctx context.Context, t *testing.T, a *raceAPI, p *Provider) {
 	t.Helper()
 	postsBefore, recordsBefore, _ := a.snapshot()
-	for i, p := range providers {
-		if err := p.reconcile(ctx); err != nil {
-			t.Fatalf("provider %d resync: %v", i, err)
-		}
+	if err := p.reconcile(ctx); err != nil {
+		t.Fatalf("plugin resync: %v", err)
 	}
 	posts, records, _ := a.snapshot()
 	if len(posts) != len(postsBefore) {
@@ -233,44 +257,34 @@ func wantPolicy(ip string) map[string]any {
 	return map[string]any{"type": "A_RECORD", "enabled": true, "domain": raceHost, "ipv4Address": ip, "ttlSeconds": float64(300)}
 }
 
-// assertBothListedEmpty proves the barrier held: each provider's first list saw an empty zone.
+// assertBothListedEmpty proves both writers acted on an empty zone.
 func assertBothListedEmpty(t *testing.T, callers map[string]int) {
 	t.Helper()
 	if want := map[string]int{"key-a": 0, "key-b": 0}; !reflect.DeepEqual(callers, want) {
-		t.Fatalf("first list snapshots (records seen per provider) = %v, want %v", callers, want)
+		t.Fatalf("first list snapshots (records seen per writer) = %v, want %v", callers, want)
 	}
 }
 
-// Both providers see an empty zone, then both POST the same name. The server rejects the second
-// with 409. Exactly one record survives with the winner's payload; the loser logs the failure and
-// does not retry or overwrite; later reconciles add nothing and never call anything destructive.
+// Both writers see an empty zone. The remote writer wins and the plugin receives a 409.
+// The plugin logs the failure and does not retry or overwrite the record.
 func TestConcurrentCreatesServerRejectsDuplicate(t *testing.T) {
 	ctx, cancel := raceContext()
 	defer cancel()
 	api := newRaceAPI(t, false)
-	a, logA := api.provider(ctx, "key-a")
-	b, logB := api.provider(ctx, "key-b")
+	p, logs := api.provider(ctx, "key-a")
 
-	reconcileTogether(ctx, t, a, b)
+	api.reconcileAgainstRemote(ctx, p)
 
 	posts, records, callers := api.snapshot()
 	assertBothListedEmpty(t, callers)
-	if len(posts) != 2 || posts[0].caller == posts[1].caller {
-		t.Fatalf("want exactly one POST per provider (no blind retry), got %v", posts)
-	}
-	statuses := []int{posts[0].status, posts[1].status}
-	slices.Sort(statuses)
-	if !slices.Equal(statuses, []int{http.StatusOK, http.StatusConflict}) {
-		t.Fatalf("POST statuses = %v, want one 200 and one 409", statuses)
+	if len(posts) != 2 || posts[0].caller != "key-b" || posts[0].status != http.StatusOK ||
+		posts[1].caller != "key-a" || posts[1].status != http.StatusConflict {
+		t.Fatalf("want one remote POST (200) and one plugin POST (409), got %v", posts)
 	}
 	for _, p := range posts {
 		if want := wantPolicy(raceKeys[p.caller]); !reflect.DeepEqual(p.policy, want) {
 			t.Fatalf("%s POST payload %v, want %v", p.caller, p.policy, want)
 		}
-	}
-	winner, loser := posts[0], posts[1]
-	if winner.status != http.StatusOK {
-		winner, loser = loser, winner
 	}
 
 	if len(records) != 1 {
@@ -280,38 +294,32 @@ func TestConcurrentCreatesServerRejectsDuplicate(t *testing.T) {
 		t.Fatalf("remote record has no id: %v", records[0])
 	}
 	delete(records[0], "id")
-	if want := wantPolicy(raceKeys[winner.caller]); !reflect.DeepEqual(records[0], want) {
+	if want := wantPolicy(raceKeys["key-b"]); !reflect.DeepEqual(records[0], want) {
 		t.Fatalf("remote record %v, want winner's %v", records[0], want)
 	}
 
-	logs := map[string]*bytes.Buffer{"key-a": logA, "key-b": logB}
-	if got, want := logs[winner.caller].String(), "created A record "+raceHost+" -> "+raceKeys[winner.caller]; !strings.Contains(got, want) {
-		t.Fatalf("winner log %q lacks %q", got, want)
-	}
-	got := logs[loser.caller].String()
+	got := logs.String()
 	if strings.Contains(got, "created A record") || !strings.Contains(got, "create DNS record for "+raceHost) {
-		t.Fatalf("loser log %q: want a logged create failure and no success", got)
+		t.Fatalf("plugin log %q: want a logged create failure and no success", got)
 	}
 
-	assertResyncIsQuiet(ctx, t, api, a, b)
+	assertResyncIsQuiet(ctx, t, api, p)
 }
 
-// BOUNDARY, not a safety claim: nothing in the plugin stops two instances creating the same
-// name. When the server accepts duplicate POSTs, both instances create one, and the plugin
-// never deletes either afterwards. List-then-create cannot be made atomic across instances.
-func TestBoundaryNoCrossInstanceUniquenessWhenServerAcceptsDuplicates(t *testing.T) {
+// List-then-create is not atomic across processes. A permissive server can accept both POSTs,
+// and the plugin will not delete either record afterwards.
+func TestBoundaryNoCrossProcessUniquenessWhenServerAcceptsDuplicates(t *testing.T) {
 	ctx, cancel := raceContext()
 	defer cancel()
 	api := newRaceAPI(t, true)
-	a, _ := api.provider(ctx, "key-a")
-	b, _ := api.provider(ctx, "key-b")
+	p, _ := api.provider(ctx, "key-a")
 
-	reconcileTogether(ctx, t, a, b)
+	api.reconcileAgainstRemote(ctx, p)
 
 	posts, records, callers := api.snapshot()
 	assertBothListedEmpty(t, callers)
 	if len(posts) != 2 || posts[0].status != http.StatusOK || posts[1].status != http.StatusOK || posts[0].caller == posts[1].caller {
-		t.Fatalf("want one accepted POST per provider, got %v", posts)
+		t.Fatalf("want one accepted POST per writer, got %v", posts)
 	}
 	if len(records) != 2 {
 		t.Fatalf("remote records = %v, want two duplicates", records)
@@ -331,5 +339,124 @@ func TestBoundaryNoCrossInstanceUniquenessWhenServerAcceptsDuplicates(t *testing
 	}
 
 	// Create-only: the duplicates stay, nothing is posted again, nothing is deleted.
-	assertResyncIsQuiet(ctx, t, api, a, b)
+	assertResyncIsQuiet(ctx, t, api, p)
+}
+
+type localConcurrencyDNS struct {
+	postStarted chan struct{}
+	finishPost  chan struct{}
+	lists       int
+	posts       int
+	records     []unifi.DNSRecord
+}
+
+func (s *localConcurrencyDNS) ListRecords(context.Context) ([]unifi.DNSRecord, error) {
+	s.lists++
+	return slices.Clone(s.records), nil
+}
+
+func (s *localConcurrencyDNS) CreateRecord(_ context.Context, record unifi.DNSRecord) (string, error) {
+	s.posts++
+	if s.posts == 1 {
+		close(s.postStarted)
+		<-s.finishPost
+	}
+	s.records = append(s.records, record)
+	return "id", nil
+}
+
+func (*localConcurrencyDNS) DeleteRecord(context.Context, string) error {
+	panic("plugin must not delete records")
+}
+
+type routerResponseTransport struct{}
+
+func (routerResponseTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`[{"name":"app@docker","provider":"docker","status":"enabled","rule":"Host(` + "`" + raceHost + "`" + `)"}]`,
+		)),
+	}, nil
+}
+
+func TestConcurrentProvidersCreateOnce(t *testing.T) {
+	testLocalConcurrency(t, false)
+}
+
+func TestConcurrentProviderWaiterCanCancel(t *testing.T) {
+	testLocalConcurrency(t, true)
+}
+
+func testLocalConcurrency(t *testing.T, cancelWaiter bool) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		dns := &localConcurrencyDNS{postStarted: make(chan struct{}), finishPost: make(chan struct{})}
+		newProvider := func(endpoint, site, address string) *Provider {
+			cfg := testConfig(endpoint)
+			cfg.UnifiSite, cfg.Address = site, address
+			p, err := New(ctx, cfg, site)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.client.Transport = routerResponseTransport{}
+			p.dns = dns
+			return p
+		}
+		a := newProvider("https://CONTROLLER.home.arpa.", "default", "192.0.2.10")
+		b := newProvider("https://controller.home.arpa:443", "site-id", "192.0.2.20")
+
+		holder := make(chan error, 1)
+		go func() { holder <- a.reconcile(ctx) }()
+		select {
+		case <-dns.postStarted:
+		case err := <-holder:
+			t.Fatalf("first provider returned before POST: %v", err)
+		}
+
+		waitCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		waiter := make(chan struct{})
+		var waiterErr error
+		go func() {
+			waiterErr = b.reconcile(waitCtx)
+			close(waiter)
+		}()
+		synctest.Wait()
+		if dns.lists != 1 || dns.posts != 1 {
+			t.Errorf("second provider reached UniFi during first POST: lists=%d, posts=%d", dns.lists, dns.posts)
+		}
+		if cancelWaiter {
+			cancel()
+			synctest.Wait()
+			select {
+			case <-waiter:
+				if !errors.Is(waiterErr, context.Canceled) {
+					t.Errorf("canceled waiter returned %v, want context.Canceled", waiterErr)
+				}
+			default:
+				t.Error("canceled waiter did not return while first POST was in flight")
+			}
+		}
+
+		close(dns.finishPost)
+		if err := <-holder; err != nil {
+			t.Errorf("first reconcile: %v", err)
+		}
+		<-waiter
+		if !cancelWaiter && waiterErr != nil {
+			t.Errorf("second reconcile: %v", waiterErr)
+		}
+		wantLists := 2
+		if cancelWaiter {
+			wantLists = 1
+		}
+		if dns.lists != wantLists || dns.posts != 1 {
+			t.Errorf("lists=%d, posts=%d; want lists=%d, posts=1", dns.lists, dns.posts, wantLists)
+		}
+		if len(dns.records) != 1 || dns.records[0].Hostname != raceHost || dns.records[0].IP != "192.0.2.10" {
+			t.Errorf("records = %v, want only the first provider's record", dns.records)
+		}
+	})
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 	"github.com/j0sh3rs/bollard/internal/docker"
 	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/resolver"
@@ -66,6 +68,46 @@ func (r *Reconciler) HandleEvent(ctx context.Context, e docker.Event) error {
 	}
 }
 
+type occupiedName struct {
+	count  int
+	record *unifi.DNSRecord
+}
+
+type occupiedNames map[string]occupiedName
+
+func indexNames(records []unifi.DNSRecord) occupiedNames {
+	names := make(occupiedNames, len(records))
+	for i := range records {
+		rec := &records[i]
+		name := dnsname.Canonical(rec.Hostname)
+		entry := names[name]
+		entry.count++
+		if entry.count == 1 {
+			entry.record = rec
+		} else {
+			entry.record = nil
+		}
+		names[name] = entry
+	}
+	return names
+}
+
+func (names occupiedNames) remove(name string) {
+	entry := names[name]
+	if entry.count <= 1 {
+		delete(names, name)
+		return
+	}
+	entry.count--
+	names[name] = entry
+}
+
+func (r *Reconciler) countHostnameConflict() {
+	if r.metrics != nil {
+		r.metrics.HostnameConflictsTotal.Inc()
+	}
+}
+
 func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 	spec, err := docker.ParseLabels(e.Labels)
 	if err != nil {
@@ -80,15 +122,35 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 	if err != nil {
 		return fmt.Errorf("reconciler: list store: %w", err)
 	}
-	for _, rec := range all {
-		if rec.Hostname == spec.Hostname {
-			if r.metrics != nil {
-				r.metrics.HostnameConflictsTotal.Inc()
-			}
-			return fmt.Errorf("reconciler: hostname %q already owned by container %s", spec.Hostname, rec.ContainerID)
+	var owner *store.Record
+	for i := range all {
+		rec := &all[i]
+		if rec.ContainerID == e.ContainerID {
+			// Reconcile owns repairs; a repeated start must not replace its row.
+			return nil
+		}
+		if dnsname.Canonical(rec.Hostname) == spec.Hostname {
+			owner = rec
 		}
 	}
+	if owner != nil {
+		r.countHostnameConflict()
+		return fmt.Errorf("reconciler: hostname %q already owned by container %s", spec.Hostname, owner.ContainerID)
+	}
+	records, err := r.provider.ListRecords(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler: list unifi records: %w", err)
+	}
+	for _, rec := range records {
+		if dnsname.Canonical(rec.Hostname) == spec.Hostname {
+			r.countHostnameConflict()
+			return fmt.Errorf("reconciler: hostname %q already occupied in UniFi", spec.Hostname)
+		}
+	}
+	return r.createRecord(ctx, e, spec, nil)
+}
 
+func (r *Reconciler) createRecord(ctx context.Context, e docker.Event, spec *docker.RecordSpec, names occupiedNames) error {
 	ip, err := r.resolvedIP(spec.IPOverride)
 	if err != nil {
 		if r.metrics != nil {
@@ -97,6 +159,10 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		return fmt.Errorf("reconciler: resolve IP for %s (%s): %w", spec.Hostname, e.Ref(), err)
 	}
 
+	if names != nil {
+		// A failed POST can still have created a record.
+		names[spec.Hostname] = occupiedName{count: 1}
+	}
 	unifiID, err := r.provider.CreateRecord(ctx, unifi.DNSRecord{
 		Hostname: spec.Hostname, IP: ip, RecordType: spec.RecordType, TTL: spec.TTL,
 	})
@@ -107,19 +173,10 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 		return fmt.Errorf("reconciler: create record %s for %s: %w", spec.Hostname, e.Ref(), err)
 	}
 
-	now := time.Now().UTC()
-	if err := r.store.Create(ctx, store.Record{
-		ID:            uuid.New().String(),
-		ContainerID:   e.ContainerID,
-		Hostname:      spec.Hostname,
-		IP:            ip,
-		RecordType:    spec.RecordType,
-		TTL:           spec.TTL,
-		UnifiRecordID: unifiID,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}); err != nil {
-		_ = r.provider.DeleteRecord(ctx, unifiID)
+	if err := r.saveOwnership(ctx, e.ContainerID, spec, ip, unifiID); err != nil {
+		if r.provider.DeleteRecord(ctx, unifiID) == nil {
+			delete(names, spec.Hostname)
+		}
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
 		}
@@ -131,6 +188,21 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 	}
 	r.log.Info("created DNS record", "hostname", spec.Hostname, "ip", ip, "container", e.Ref())
 	return nil
+}
+
+func (r *Reconciler) saveOwnership(ctx context.Context, containerID string, spec *docker.RecordSpec, ip, unifiID string) error {
+	now := time.Now().UTC()
+	return r.store.Create(ctx, store.Record{
+		ID:            uuid.New().String(),
+		ContainerID:   containerID,
+		Hostname:      spec.Hostname,
+		IP:            ip,
+		RecordType:    spec.RecordType,
+		TTL:           spec.TTL,
+		UnifiRecordID: unifiID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	})
 }
 
 func (r *Reconciler) handleStop(ctx context.Context, e docker.Event) error {
@@ -228,19 +300,28 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	// Pass 1: remove store rows whose UniFi record no longer exists.
-	unifiIndex := map[string]struct{}{}
-	for _, ur := range unifiRecords {
-		unifiIndex[ur.ID] = struct{}{}
+	names := indexNames(unifiRecords)
+	unifiIndex := make(map[string]*unifi.DNSRecord, len(unifiRecords))
+	for i := range unifiRecords {
+		unifiIndex[unifiRecords[i].ID] = &unifiRecords[i]
 	}
+	ownedNames := make(map[string]int, len(storeRecords))
+	storeIndex := make(map[string]struct{}, len(storeRecords))
 	for _, sr := range storeRecords {
+		storeIndex[sr.ContainerID] = struct{}{}
 		if _, exists := unifiIndex[sr.UnifiRecordID]; !exists {
 			r.log.Warn("orphaned store record, cleaning up",
 				"hostname", sr.Hostname, "unifi_id", sr.UnifiRecordID)
-			_ = r.store.Delete(ctx, sr.ID)
-			if r.metrics != nil {
-				r.metrics.OrphansCleanedTotal.Inc()
+			if err := r.store.Delete(ctx, sr.ID); err == nil {
+				if r.metrics != nil {
+					r.metrics.OrphansCleanedTotal.Inc()
+				}
+				continue
+			} else {
+				r.log.Error("reconcile: delete orphaned store row failed", "id", sr.ID, "err", err)
 			}
 		}
+		ownedNames[dnsname.Canonical(sr.Hostname)]++
 	}
 
 	// Pass 2: retry deletes for records whose container has stopped —
@@ -254,23 +335,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.log.Warn("reconcile: list running containers failed", "err", err)
 		return nil // best-effort; don't fail the full tick
 	}
-	runningSet := make(map[string]struct{}, len(running))
-	for containerID := range running {
-		runningSet[containerID] = struct{}{}
-	}
 	// Records still referenced by a running row are never deleted, even
 	// when the stopped row is a duplicate of it.
 	runningUnifiIDs := map[string]struct{}{}
 	for _, sr := range storeRecords {
-		if _, ok := runningSet[sr.ContainerID]; ok {
+		if _, ok := running[sr.ContainerID]; ok {
 			runningUnifiIDs[sr.UnifiRecordID] = struct{}{}
 		}
 	}
 	for _, sr := range storeRecords {
-		if _, ok := runningSet[sr.ContainerID]; ok {
+		if _, ok := running[sr.ContainerID]; ok {
 			continue
 		}
-		if _, ok := unifiIndex[sr.UnifiRecordID]; !ok {
+		rec, exists := unifiIndex[sr.UnifiRecordID]
+		if !exists {
 			continue // pass 1 already removed this row
 		}
 		if _, shared := runningUnifiIDs[sr.UnifiRecordID]; shared {
@@ -278,15 +356,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 				"hostname", sr.Hostname, "container", sr.ContainerID, "unifi_id", sr.UnifiRecordID)
 			continue
 		}
-		if err := r.provider.DeleteRecord(ctx, sr.UnifiRecordID); err != nil {
-			r.log.Warn("reconcile: retry delete unifi record failed",
-				"hostname", sr.Hostname, "container", sr.ContainerID, "unifi_id", sr.UnifiRecordID, "err", err)
-			continue
+		if rec != nil {
+			if err := r.provider.DeleteRecord(ctx, sr.UnifiRecordID); err != nil {
+				r.log.Warn("reconcile: retry delete unifi record failed",
+					"hostname", sr.Hostname, "container", sr.ContainerID, "unifi_id", sr.UnifiRecordID, "err", err)
+				continue
+			}
+			names.remove(dnsname.Canonical(rec.Hostname))
+			unifiIndex[sr.UnifiRecordID] = nil // Other stopped rows may reference this ID.
 		}
 		if err := r.store.Delete(ctx, sr.ID); err != nil {
 			r.log.Error("reconcile: delete store row after record delete failed", "id", sr.ID, "err", err)
 			continue
 		}
+		ownedNames[dnsname.Canonical(sr.Hostname)]--
 		r.log.Info("reconcile: deleted record for stopped container", "hostname", sr.Hostname, "container", sr.ContainerID)
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("deleted", "true").Inc()
@@ -294,10 +377,6 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	}
 
 	// Pass 3: missed-event recovery — running containers with labels but no store row.
-	storeIndex := map[string]struct{}{}
-	for _, sr := range storeRecords {
-		storeIndex[sr.ContainerID] = struct{}{}
-	}
 	for containerID, labels := range running {
 		if _, owned := storeIndex[containerID]; owned {
 			continue
@@ -306,10 +385,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		if err != nil || spec == nil || !spec.Enabled {
 			continue
 		}
-		r.log.Info("reconcile: creating record for unlabeled running container", "container", containerID)
-		if err := r.handleStart(ctx, docker.Event{
-			Type: "start", ContainerID: containerID, Labels: labels,
-		}); err != nil {
+		if ownedNames[spec.Hostname] > 0 || names[spec.Hostname].count > 0 {
+			r.countHostnameConflict()
+			r.log.Warn("reconcile: hostname occupied, not creating", "hostname", spec.Hostname, "container", containerID)
+			continue
+		}
+		if err := r.createRecord(ctx, docker.Event{ContainerID: containerID}, spec, names); err != nil {
 			r.log.Error("reconcile: missed-event recovery failed", "container", containerID, "err", err)
 		} else {
 			if r.metrics != nil {
@@ -321,32 +402,45 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 }
 
 // Adopt reclaims ownership of existing UniFi records for running containers.
-// running is a map of containerID → labels. Non-destructive: if no matching
-// UniFi record exists, handleStart is called to create one.
+// It creates records only when the name is vacant.
 func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]string) error {
 	unifiRecords, err := r.provider.ListRecords(ctx)
 	if err != nil {
 		return fmt.Errorf("adopt: list unifi records: %w", err)
 	}
-	type key struct{ hostname, ip string }
-	unifiByKey := map[key]unifi.DNSRecord{}
-	for _, ur := range unifiRecords {
-		unifiByKey[key{ur.Hostname, ur.IP}] = ur
-	}
-
-	// Hostnames owned by any store row — before this run or written during
-	// it. A second adopt for the same hostname is a conflict, not an overwrite.
-	ownedHostnames := map[string]struct{}{}
+	names := indexNames(unifiRecords)
 	all, err := r.store.ListAll(ctx)
 	if err != nil {
 		return fmt.Errorf("adopt: list store: %w", err)
 	}
+	ownedNames := make(map[string]bool, len(all))
+	ownedContainers := make(map[string]bool, len(all))
+	ownedIDs := make(map[string]bool, len(all))
 	for _, rec := range all {
-		ownedHostnames[rec.Hostname] = struct{}{}
+		ownedNames[dnsname.Canonical(rec.Hostname)] = true
+		ownedContainers[rec.ContainerID] = true
+		ownedIDs[rec.UnifiRecordID] = true
 	}
 	for containerID, labels := range running {
+		if ownedContainers[containerID] {
+			continue
+		}
 		spec, err := docker.ParseLabels(labels)
 		if err != nil || spec == nil || !spec.Enabled {
+			continue
+		}
+		if ownedNames[spec.Hostname] {
+			r.countHostnameConflict()
+			r.log.Warn("adopt: hostname already owned, skipping", "hostname", spec.Hostname, "container", containerID)
+			continue
+		}
+		entry := names[spec.Hostname]
+		if entry.count == 0 {
+			if err := r.createRecord(ctx, docker.Event{ContainerID: containerID}, spec, names); err != nil {
+				r.log.Error("adopt: create record failed", "container", containerID, "err", err)
+			} else {
+				ownedNames[spec.Hostname] = true
+			}
 			continue
 		}
 		ip, err := r.resolvedIP(spec.IPOverride)
@@ -354,44 +448,24 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 			r.log.Warn("adopt: cannot resolve IP", "container", containerID, "err", err)
 			continue
 		}
-		existing, _ := r.store.GetByContainerID(ctx, containerID)
-		if existing != nil {
+		ip4 := net.ParseIP(ip).To4()
+		rec := entry.record
+		if rec == nil || rec.ID == "" || ownedIDs[rec.ID] || rec.Disabled || rec.RecordType != "A" ||
+			ip4 == nil || !ip4.Equal(net.ParseIP(rec.IP)) {
+			r.countHostnameConflict()
+			r.log.Warn("adopt: no unique eligible record for occupied hostname", "hostname", spec.Hostname, "container", containerID)
 			continue
 		}
-		k := key{spec.Hostname, ip}
-		unifiRec, found := unifiByKey[k]
-		now := time.Now().UTC()
-		if found {
-			if _, owned := ownedHostnames[spec.Hostname]; owned {
-				r.log.Warn("adopt: hostname already owned, skipping", "hostname", spec.Hostname, "container", containerID)
-				if r.metrics != nil {
-					r.metrics.HostnameConflictsTotal.Inc()
-				}
-				continue
-			}
-			if err := r.store.Create(ctx, store.Record{
-				ID: uuid.New().String(), ContainerID: containerID,
-				Hostname: spec.Hostname, IP: ip, RecordType: spec.RecordType,
-				TTL: spec.TTL, UnifiRecordID: unifiRec.ID,
-				CreatedAt: now, UpdatedAt: now,
-			}); err != nil {
-				r.log.Error("adopt: store create failed", "container", containerID, "err", err)
-				continue
-			}
-			ownedHostnames[spec.Hostname] = struct{}{}
-			if r.metrics != nil {
-				r.metrics.RecordsTotal.WithLabelValues("adopted", "true").Inc()
-			}
-			r.log.Info("adopted existing unifi record", "hostname", spec.Hostname, "container", containerID)
-		} else {
-			if err := r.handleStart(ctx, docker.Event{
-				Type: "start", ContainerID: containerID, Labels: labels,
-			}); err != nil {
-				r.log.Error("adopt: create record failed", "container", containerID, "err", err)
-			} else {
-				ownedHostnames[spec.Hostname] = struct{}{}
-			}
+		if err := r.saveOwnership(ctx, containerID, spec, ip, rec.ID); err != nil {
+			r.log.Error("adopt: store create failed", "container", containerID, "err", err)
+			continue
 		}
+		ownedNames[spec.Hostname] = true
+		ownedIDs[rec.ID] = true
+		if r.metrics != nil {
+			r.metrics.RecordsTotal.WithLabelValues("adopted", "true").Inc()
+		}
+		r.log.Info("adopted existing unifi record", "hostname", spec.Hostname, "container", containerID)
 	}
 	return nil
 }

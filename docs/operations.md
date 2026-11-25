@@ -25,13 +25,13 @@ Log messages you should recognise (abridged):
 | `failed to delete unifi record` | UniFi delete failed during a stop; the store row is kept and retried on the next reconcile tick |
 | `reconcile: deleted record for stopped container` | A record whose container is gone was deleted automatically (missed stop or failed delete) |
 
-Startup failures exit non-zero and Docker restarts the container; read the last log line before the exit.
+If the controller is temporarily unavailable, bollard retries with backoff. `bollard_up` remains `0` during startup even if `/healthz` returns 200. Configuration, site, and authentication errors exit non-zero; read the last log line before the exit.
 
 ## Adopt existing records
 
 Use `--adopt` when the state store was lost or replaced and UniFi already holds the records, or when you moved bollard to a new host.
 
-What it does: for each running, enabled, labelled container without a store row, it looks for an enabled UniFi A record with the same hostname and IP. A match is written to the store; **no match causes the record to be created**. It never deletes records. After the phase completes, bollard continues into normal operation, so it does not exit.
+For each running, enabled, labelled container without a store row, bollard adopts only a sole enabled A record with the same hostname and IP. It creates a record if the name is free, and skips anything else. It never deletes during adoption, and continues into normal operation when the phase finishes.
 
 If two running containers carry the same `dns.bollard/hostname` label, only the first one processed gets a store row; the rest are rejected as hostname conflicts and logged (`adopt: hostname already owned, skipping` or a failed record creation). Fix the duplicate label — bollard enforces one container per hostname (see [Architecture](architecture.md)).
 
@@ -66,7 +66,7 @@ psql "$DATABASE_URL" -c "SELECT hostname, ip, unifi_record_id FROM records ORDER
 docker ps --filter label=dns.bollard/hostname --format '{{.Names}}'
 ```
 
-Compare the two lists. For each hostname with no running container and no store row, delete the record in the UniFi DNS settings.
+Compare the lists with UniFi DNS settings and a recent store backup. Delete a record only after confirming from the backup or deployment history that you own it and no service uses it. A missing row or Docker label alone does not prove the record is stale.
 
 If bollard is offline and you want records gone, delete them in UniFi; bollard cleans its store when it next runs.
 
@@ -74,7 +74,7 @@ Records for stopped containers with no store row stay in UniFi until deleted. Do
 
 ## Back up and restore the store
 
-The store maps containers to UniFi record IDs. Losing it does not change UniFi, but bollard cannot track or delete those records until you run `--adopt`.
+The store maps containers to UniFi record IDs. Losing it does not change UniFi. Restore a backup, or use `--adopt` to recover eligible records for running containers.
 
 **SQLite** (file path from `DATABASE_URL`, usually in a named volume). The image has no shell or `sqlite3`; run these on the host, against the volume's mount point (`docker volume inspect <volume>`):
 
@@ -126,4 +126,4 @@ Create a new key in UniFi, update `UNIFI_API_KEY`, run `docker compose up -d bol
 curl -s localhost:9090/metrics | grep -E '^bollard_(up|records_active|reconcile_last_timestamp_seconds)'
 ```
 
-Which metrics are populated is documented in [Monitoring](monitoring.md); several declared metrics are not yet recorded.
+See [Monitoring](monitoring.md) for metric labels and alerting examples.

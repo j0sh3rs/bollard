@@ -8,7 +8,7 @@ import (
 
 func TestParseLabels_OptIn(t *testing.T) {
 	labels := map[string]string{
-		"dns.bollard/hostname": "myapp.home.arpa",
+		"dns.bollard/hostname": "MyApp.HOME.arpa.",
 	}
 	spec, err := docker.ParseLabels(labels)
 	if err != nil {
@@ -39,6 +39,17 @@ func TestParseLabels_OptOut(t *testing.T) {
 	}
 	if spec != nil {
 		t.Fatal("expected nil spec when hostname label absent")
+	}
+}
+
+func TestParseLabels_InvalidHostname(t *testing.T) {
+	for _, host := range []string{"bad_host.home.arpa", "home.arpa..", "192.0.2.1"} {
+		t.Run(host, func(t *testing.T) {
+			spec, err := docker.ParseLabels(map[string]string{"dns.bollard/hostname": host})
+			if spec != nil || err == nil {
+				t.Fatalf("ParseLabels: got %+v, %v; want no spec and an error", spec, err)
+			}
+		})
 	}
 }
 

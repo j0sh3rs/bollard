@@ -8,16 +8,25 @@ import (
 	"time"
 
 	"github.com/j0sh3rs/bollard/internal/docker"
+	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/reconciler"
 	"github.com/j0sh3rs/bollard/internal/store"
 	"github.com/j0sh3rs/bollard/internal/unifi"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
-type fakeStore struct{ records map[string]store.Record }
+type fakeStore struct {
+	records   map[string]store.Record
+	createErr error
+}
 
 func newFakeStore() *fakeStore { return &fakeStore{records: map[string]store.Record{}} }
 
 func (f *fakeStore) Create(_ context.Context, r store.Record) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	if _, exists := f.records[r.ContainerID]; exists {
 		return fmt.Errorf("duplicate container_id %s", r.ContainerID)
 	}
@@ -69,15 +78,22 @@ func (f *fakeLister) ListRunning(_ context.Context) (map[string]map[string]strin
 }
 
 type fakeProvider struct {
-	records   map[string]unifi.DNSRecord
-	nextID    int
-	deleteErr error
+	records           map[string]unifi.DNSRecord
+	nextID            int
+	listCalls         int
+	listErr           error
+	deleteErr         error
+	createResponseErr error
 }
 
 func newFakeProvider() *fakeProvider {
 	return &fakeProvider{records: map[string]unifi.DNSRecord{}}
 }
 func (f *fakeProvider) ListRecords(_ context.Context) ([]unifi.DNSRecord, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	var out []unifi.DNSRecord
 	for _, r := range f.records {
 		out = append(out, r)
@@ -89,6 +105,9 @@ func (f *fakeProvider) CreateRecord(_ context.Context, r unifi.DNSRecord) (strin
 	id := fmt.Sprintf("unifi-%d", f.nextID)
 	r.ID = id
 	f.records[id] = r
+	if f.createResponseErr != nil {
+		return "", f.createResponseErr
+	}
 	return id, nil
 }
 func (f *fakeProvider) DeleteRecord(_ context.Context, id string) error {
@@ -407,13 +426,19 @@ func TestAdopt_DuplicateHostnameSkipsSecond(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
 	p.records["unifi-web"] = unifi.DNSRecord{
-		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1",
+		ID: "unifi-web", Hostname: "WEB.Home.Arpa.", IP: "192.168.1.1", RecordType: "A",
 	}
-	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+	conflicts := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_hostname_conflicts_total"})
+	m := &metrics.Metrics{
+		HostnameConflictsTotal: conflicts,
+		RecordsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_records_total"},
+			[]string{"action", "success"}),
+	}
+	r := reconciler.New(s, p, nil, "192.168.1.1", m, slog.Default())
 
 	running := map[string]map[string]string{
 		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
-		"container-b": {"dns.bollard/hostname": "web.home.arpa"},
+		"container-b": {"dns.bollard/hostname": "Web.home.arpa."},
 	}
 	if err := r.Adopt(context.Background(), running); err != nil {
 		t.Fatalf("Adopt: %v", err)
@@ -426,35 +451,38 @@ func TestAdopt_DuplicateHostnameSkipsSecond(t *testing.T) {
 			t.Errorf("expected adopted row to point at unifi-web, got %s", rec.UnifiRecordID)
 		}
 	}
+	var sample dto.Metric
+	if err := conflicts.Write(&sample); err != nil {
+		t.Fatalf("write conflict metric: %v", err)
+	}
+	if got := sample.GetCounter().GetValue(); got != 1 {
+		t.Errorf("hostname conflicts = %v, want 1", got)
+	}
 }
 
 func TestAdopt_DuplicateHostnameDifferentIP(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
 	p.records["unifi-web"] = unifi.DNSRecord{
-		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1",
+		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1", RecordType: "A",
 	}
 	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
 
 	running := map[string]map[string]string{
 		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
-		// Different IP: no matching record, so container-b goes through the
-		// start path.
+		// An occupied name with a different IP is not a creation candidate.
 		"container-b": {"dns.bollard/hostname": "web.home.arpa", "dns.bollard/ip-override": "10.0.0.5"},
 	}
 	if err := r.Adopt(context.Background(), running); err != nil {
 		t.Fatalf("Adopt must be non-fatal on conflict: %v", err)
 	}
-	// Whichever duplicate container is processed first owns the hostname;
-	// the other is rejected (found-branch guard or handleStart conflict).
-	// Exactly one row must remain, under the hostname — no two rows may
-	// share it, no two rows may share a UnifiRecordID.
+	// Only the container whose address matches may own the existing record.
 	if len(s.records) != 1 {
 		t.Fatalf("expected exactly 1 store row for hostname web, got %d", len(s.records))
 	}
-	for _, rec := range s.records {
-		if rec.Hostname != "web.home.arpa" {
-			t.Fatalf("store row has hostname %q, want web.home.arpa", rec.Hostname)
+	for containerID, rec := range s.records {
+		if containerID != "container-a" || rec.UnifiRecordID != "unifi-web" || rec.Hostname != "web.home.arpa" {
+			t.Fatalf("unexpected owner %s: %+v", containerID, rec)
 		}
 	}
 }
@@ -463,7 +491,7 @@ func TestAdopt_NoDuplicateSingleContainer(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
 	p.records["unifi-only"] = unifi.DNSRecord{
-		ID: "unifi-only", Hostname: "only.home.arpa", IP: "192.168.1.1",
+		ID: "unifi-only", Hostname: "Only.HOME.arpa.", IP: "192.168.1.1", RecordType: "A",
 	}
 	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
 
@@ -476,7 +504,8 @@ func TestAdopt_NoDuplicateSingleContainer(t *testing.T) {
 	if len(s.records) != 1 {
 		t.Fatalf("expected 1 store row, got %d", len(s.records))
 	}
-	if rec, _ := s.GetByContainerID(context.Background(), "container-1"); rec == nil || rec.UnifiRecordID != "unifi-only" {
+	if rec, _ := s.GetByContainerID(context.Background(), "container-1"); rec == nil ||
+		rec.UnifiRecordID != "unifi-only" || rec.Hostname != "only.home.arpa" {
 		t.Fatal("expected container-1 to adopt unifi-only")
 	}
 }

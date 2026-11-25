@@ -101,12 +101,26 @@ func (t *httpTransport) doOnce(ctx context.Context, method, url string, body []b
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	observe := t.cfg.ObserveRequest
+	var started time.Time
+	if observe != nil {
+		started = time.Now()
+	}
 	resp, err := t.client.Do(req)
 	if err != nil {
+		if observe != nil {
+			observe(method, 0, time.Since(started))
+		}
 		return nil, 0, fmt.Errorf("unifi: request: %w", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	if observe != nil {
+		observe(method, resp.StatusCode, time.Since(started))
+	}
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("unifi: read body: %w", err)
 	}

@@ -9,13 +9,13 @@ Metrics and alerting for the **standalone Docker daemon**. The Traefik plugin ex
 | `GET /metrics` | Prometheus exposition format |
 | `GET /healthz` | Returns HTTP 200 while the process serves HTTP. It does not test UniFi, Docker, or the store |
 
-Both are served on `METRICS_ADDR` (default `:9090`, all interfaces) with no authentication. Restrict access with a firewall or network policy. See [Configuration](configuration.md#metrics_addr) for the healthcheck limitation with host-qualified addresses.
+Both endpoints are served on `METRICS_ADDR` (default `:9090`, all interfaces) with no authentication. Bind to loopback or restrict access with a firewall or network policy. See [host-qualified examples](configuration.md#metrics_addr).
 
 The registry also exposes the default Go and process collectors.
 
-## What is actually recorded
+## Recorded metrics
 
-All metrics are registered at startup, but not all are written by the code on `main`. Verified against `main.go` and `internal/reconciler`:
+All metrics are registered at startup. Labelled series appear when first observed.
 
 | Metric | Status |
 |---|---|
@@ -29,13 +29,11 @@ All metrics are registered at startup, but not all are written by the code on `m
 | `bollard_reconcile_last_timestamp_seconds` | recorded |
 | `bollard_docker_events_total` | recorded |
 | `bollard_docker_event_errors_total` | recorded (`stage="handle"` only) |
-| `bollard_unifi_requests_total` | **declared, never recorded** (no series appear) |
-| `bollard_unifi_request_duration_seconds` | **declared, never recorded** |
-| `bollard_unifi_api_version` | **declared, never recorded** |
+| `bollard_unifi_requests_total` | every HTTP attempt, including retries |
+| `bollard_unifi_request_duration_seconds` | duration of each HTTP attempt |
+| `bollard_unifi_api_version` | set when endpoint selection succeeds |
 | `bollard_build_info` | recorded |
-| `bollard_up` | recorded: `0` during startup, `1` once the event loop starts; never reset to `0` on shutdown |
-
-Do not build alerts on the three UniFi metrics until they are wired. Use `bollard_reconcile_iterations_total`, `bollard_docker_event_errors_total`, and `bollard_records_total{success="false"}` as the available UniFi-failure signals.
+| `bollard_up` | `0` during startup, `1` in the event loop, reset to `0` on shutdown |
 
 ## Metrics reference
 
@@ -45,7 +43,7 @@ Do not build alerts on the three UniFi metrics until they are wired. Use `bollar
 
 Counter. Labels: `action` (`created`, `deleted`, `adopted`), `success` (`true`, `false`).
 
-Incremented per lifecycle operation. `success="false"` covers IP resolution failure, UniFi create failure, store write failure after create, store delete failure, and UniFi delete failure. `adopted` is only ever recorded with `success="true"`. A failed create is retried only when a later event or the reconcile missed-event pass sees the container again; a failed delete is not retried (see [Architecture](architecture.md#container-stop)).
+Incremented per lifecycle operation. `success=\"false\"` records failed operations such as IP resolution, UniFi calls, or a store write after create. `adopted` is recorded only with `success=\"true\"`. Failed deletes with an ownership row are retried during reconcile.
 
 ```promql
 rate(bollard_records_total{action="created"}[5m])
@@ -58,7 +56,7 @@ Gauge. Records in the store, refreshed at the end of each reconcile tick. It rea
 
 #### `bollard_record_hostname_conflicts_total`
 
-Counter. A start event whose hostname is already owned by a container in the **store**. Conflicts with UniFi records that bollard does not own are not detected.
+Counter. A hostname conflict detected during record creation or adoption. Existing names in the store or UniFi block creation.
 
 ```promql
 increase(bollard_record_hostname_conflicts_total[1h])
@@ -68,7 +66,7 @@ increase(bollard_record_hostname_conflicts_total[1h])
 
 #### `bollard_reconcile_orphans_cleaned_total`
 
-Counter. Store rows removed because their UniFi record no longer exists (deleted or disabled in UniFi). It does not count stopped containers; bollard does not clean those up on reconcile.
+Counter. Store rows removed because their UniFi record no longer exists. Stopped-container deletions are counted under `bollard_records_total`, not orphan cleanup.
 
 #### `bollard_reconcile_missed_recovered_total`
 
@@ -112,9 +110,11 @@ Counter. Label `stage`, currently only `handle`. Increments when handling an eve
 rate(bollard_docker_event_errors_total[5m])
 ```
 
-### UniFi API (declared, not recorded)
+### UniFi API
 
-`bollard_unifi_requests_total{method,status}`, `bollard_unifi_request_duration_seconds{method}`, and `bollard_unifi_api_version{provider}` are defined but no code writes them on `main`. They will not appear in `/metrics` output.
+- `bollard_unifi_requests_total{method,status}` counts each attempt, including startup probes and retries. `status` is the HTTP code or `error` if no response arrived.
+- `bollard_unifi_request_duration_seconds{method}` times each attempt, excluding backoff between attempts.
+- `bollard_unifi_api_version{provider}` is `1` for the selected `modern` or `legacy` provider.
 
 ### Process
 
@@ -124,7 +124,7 @@ Gauge, always `1`. Labels `version`, `goversion`.
 
 #### `bollard_up`
 
-Gauge. `0` while starting, `1` once the event loop begins. It is **not** set to `0` on shutdown or on failure, so `bollard_up == 0` does not indicate an outage. Use the scrape's own `up` series for liveness.
+Gauge. `0` during startup, including UniFi retries, `1` once the event loop begins, and reset to `0` on shutdown. The endpoint disappears when the process exits; use the scrape's own `up` series to detect that.
 
 ## Alerting
 

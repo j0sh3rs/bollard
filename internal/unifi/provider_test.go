@@ -121,6 +121,31 @@ func TestCreateAndDeleteRecord_Modern(t *testing.T) {
 	}
 }
 
+func TestModernCreateRequiresRecordID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"count":1,"totalCount":1,"data":[{"id":"site-uuid","name":"default"}]}`)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"domain":"test.home.arpa"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	p, err := unifi.New(context.Background(), newTestConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CreateRecord(context.Background(), unifi.DNSRecord{Hostname: "test.home.arpa"}); err == nil {
+		t.Fatal("accepted a create response with no ID")
+	}
+	if err := p.DeleteRecord(context.Background(), ""); err == nil {
+		t.Fatal("accepted a delete without a record ID")
+	}
+}
+
 // TestNew_LegacyFallback verifies that when the modern API probe returns 404,
 // New() falls back to the legacy provider.
 func TestNew_LegacyFallback(t *testing.T) {

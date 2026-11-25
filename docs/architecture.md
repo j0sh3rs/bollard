@@ -29,13 +29,12 @@ main.go also serves /metrics and /healthz on METRICS_ADDR.
 Order in `main.go`:
 
 1. Load and validate configuration. Invalid values exit non-zero.
-2. Create Prometheus metrics; `bollard_up` is `0`.
+2. Create Prometheus metrics and start serving `/metrics` and `/healthz`; `bollard_up` is `0`.
 3. Open the state store (`DATABASE_URL`) and run embedded migrations. Failure exits non-zero.
-4. Create the UniFi provider: resolve the site, probe the modern API, fall back to legacy only if the modern endpoint answers 404/405/501. Any other probe failure (bad key, TLS, unreachable, unknown site) exits non-zero. There is no startup retry loop beyond the per-request retries described below; rely on `restart: unless-stopped` to try again.
+4. Resolve the UniFi site. Fall back to legacy only if the first modern probe returns 404, 405, or 501. Retry transient connection errors, 429, and 5xx with cancelable backoff; bad credentials, invalid certificates, and unknown sites exit non-zero.
 5. Connect to the Docker socket. Failure exits non-zero.
-6. Start the metrics/health HTTP server. It starts before the adopt phase.
-7. If `--adopt` was passed, run the adopt phase, then continue into normal operation.
-8. Start the event stream and reconcile ticker, set `bollard_up` to `1`, and log the startup banner.
+6. If `--adopt` was passed, run the adopt phase, then continue into normal operation.
+7. Start the event stream and reconcile ticker, set `bollard_up` to `1`, and log the startup banner.
 
 The first reconcile runs one `RECONCILE_INTERVAL` after startup, not immediately.
 
@@ -46,7 +45,7 @@ The first reconcile runs one `RECONCILE_INTERVAL` after startup, not immediately
 1. Docker emits a `start` event; the watcher forwards it with the container's labels.
 2. The label parser returns nothing for containers without `dns.bollard/hostname`. Invalid labels are logged as a warning and the container is skipped.
 3. A disabled container (`dns.bollard/enabled=false`) is a no-op.
-4. The reconciler checks **its own store** for the same hostname. If another container owns it, it increments `bollard_record_hostname_conflicts_total` and returns an error. It does not look at UniFi, so a record created by hand or by another tool with the same name is not detected; UniFi may end up with two records.
+4. The reconciler checks the store and UniFi for the canonical hostname. Any record at that name blocks creation, including disabled records and other types. A failed UniFi listing also blocks creation.
 5. The host IP is resolved (see [IP resolution](#ip-resolution)).
 6. The UniFi provider creates the A record and returns a record ID.
 7. The store persists `{container_id, hostname, ip, record_type, ttl, unifi_record_id}`. If this write fails, the reconciler tries to delete the record it just created.
@@ -67,7 +66,7 @@ One tick does three things:
 
 Reconcile deletes UniFi records only for store rows it owns whose container is no longer running — the retry of a failed stop delete and the cleanup of records left behind by a missed event. It never touches records without a store row. See [Operations](operations.md#clean-up-stale-records).
 
-`ListRecords` returns enabled A records only on `main`, so a record disabled in UniFi looks missing and its store row is dropped on the next tick.
+The daemon lists all UniFi records. Disabling an owned record does not drop its ownership row, and records without a row are never deleted by reconcile.
 
 ## Ownership model
 
@@ -89,19 +88,20 @@ container_id  →  { hostname, ip, record_type, ttl, unifi_record_id }
 
 `--adopt` runs once before normal operation:
 
-1. Lists UniFi A records (enabled only).
-2. For each running, enabled, labelled container without a store row, it resolves the IP and looks for a UniFi record with the same hostname **and** IP.
-3. Match: the record ID is written to the store. Nothing changes in UniFi.
-4. No match: the container goes through the normal start path, which **creates** the record.
+1. List all UniFi records.
+2. For each running, enabled, labelled container without a store row, resolve its IP and find records occupying the canonical hostname.
+3. If exactly one record occupies the name and is an enabled A record with the same IP, write its ID to the store without modifying UniFi.
+4. An unoccupied name can be created. An occupied name that does not meet the adoption criteria stays untouched.
 
 So adopt can create records; it never deletes any. See [Operations](operations.md#adopt-existing-records).
 
 ## UniFi client
 
 - Modern API: `/proxy/network/integration/v1/sites/<id>/dns/policies`, paginated. Legacy API: static-DNS entries.
-- `UNIFI_SITE` is matched against site name or ID. On unreleased `main` it also matches `internalReference`; released versions through v0.7.0 do not.
+- `UNIFI_SITE` is matched against site name, ID, or `internalReference` (since v0.7.1).
 - 15 s request timeout, up to 3 attempts, exponential backoff from 500 ms capped at 10 s with jitter. HTTP 429 retries for any method. 5xx retries for GET and DELETE only. POST is not retried on 5xx, so a failed create waits for the next event or reconcile tick.
 - Redirects are not followed.
+- API selection lasts for the lifetime of the daemon or plugin provider. Restart after a controller API upgrade to probe again.
 
 ## IP resolution
 
@@ -116,13 +116,13 @@ It does not inspect the container's own networks. Restart bollard if the host IP
 
 | Scenario | Behaviour |
 |---|---|
-| UniFi unreachable at startup | Process exits non-zero; restart policy retries |
-| UniFi unreachable during operation | Event/tick errors logged; no store change on failed create; failed delete after store removal leaves an untracked UniFi record |
+| UniFi temporarily unreachable at startup | Retry until it recovers or the process receives a stop signal |
+| UniFi unreachable during operation | Event/tick errors are logged. A failed delete keeps the ownership row for retry |
 | Crash between UniFi create and store write | Orphan in UniFi; `--adopt` reclaims it if the container is still running |
 | Store unreachable or corrupt at startup | Process exits non-zero |
 | Docker socket unavailable at startup | Process exits non-zero |
 | Docker event stream error at runtime | Process returns and exits; restart policy reconnects |
-| Container dies while bollard is down | Record remains until removed manually |
+| Container dies while bollard is down | The next reconciliation removes the record if its ownership row still exists |
 
 ## Not stateless
 

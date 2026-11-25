@@ -4,9 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"net"
 	"strconv"
-	"strings"
+
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 )
 
 func ruleHosts(rule string) []string {
@@ -44,8 +44,8 @@ func ruleHosts(rule string) []string {
 				if err != nil {
 					continue
 				}
-				host = strings.ToLower(strings.TrimSuffix(host, "."))
-				if validHostname(host) && !seen[host] {
+				host = dnsname.Canonical(host)
+				if dnsname.Valid(host) && !seen[host] {
 					seen[host] = true
 					hosts = append(hosts, host)
 				}
@@ -54,21 +54,4 @@ func ruleHosts(rule string) []string {
 	}
 	visit(expr, false)
 	return hosts
-}
-
-func validHostname(host string) bool {
-	if host == "" || len(host) > 253 || net.ParseIP(host) != nil {
-		return false
-	}
-	for _, label := range strings.Split(host, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, c := range label {
-			if c != '-' && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-				return false
-			}
-		}
-	}
-	return true
 }

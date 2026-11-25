@@ -14,7 +14,7 @@ Automatically create UniFi DNS A records for self-hosted services. Choose the Tr
 | DNS target | Explicit client-reachable Traefik IPv4 address | Inferred host IPv4 or per-container override |
 | State | Rebuilt from Traefik and UniFi each poll; no database | Ownership database in SQLite or PostgreSQL |
 | Creates A records | Yes | Yes |
-| Deletes records | Never | Deletes owned records on observed container stop events; missed stops require manual cleanup |
+| Deletes records | Never | Deletes owned records on stop; reconciliation catches missed stops and retries failed deletes |
 | Docker socket required by Bollard | No | Yes |
 | Runs as | A Traefik provider plugin | A separate service |
 
@@ -38,16 +38,16 @@ Use the IPv4 address clients use to reach **Traefik**, not the nginx container a
 
 ### Released behavior versus current source
 
-This repository also contains changes not yet included in v0.7.0:
+v0.7.1 added two changes to the first plugin release:
 
-| Behavior | v0.7.0 | Current source |
+| Behavior | v0.7.0 | Since v0.7.1 |
 |---|---|---|
 | Modern UniFi site selection | Display name or site UUID | Also accepts `internalReference`, such as `default` for a site named `Default` |
 | Names protected against creation | Existing enabled A records | Every named record reported by UniFi, including CNAME and disabled records |
 
-For v0.7.0, configure the actual site display name or UUID. Do not assume the string `default` matches a site named `Default`. To test current source before a new release, follow the [local plugin instructions](docs/traefik/how-to.md).
+For v0.7.0, configure the actual site display name or UUID. For unreleased changes or an unindexed tag, follow the [local plugin instructions](docs/traefik/how-to.md).
 
-The plugin is **create-only**. Router removal, restart, and target-IP changes do not delete or update existing records. Run one writer for each site/domain scope: list-then-create cannot prevent duplicates across instances if UniFi accepts them. See [state and ownership explained](docs/traefik/explanation.md).
+The plugin is **create-only**. Router removal, restart, and target-IP changes do not modify existing records. Use one DNS writer per site/domain scope across Traefik replicas. See [plugin concurrency and ownership](docs/traefik/explanation.md).
 
 ## Start with the standalone controller
 

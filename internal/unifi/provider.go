@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 )
 
@@ -17,6 +18,43 @@ type DNSProvider interface {
 
 var errModernUnsupported = errors.New("unifi: modern API unsupported")
 
+type siteProbeError struct {
+	status int
+	err    error
+}
+
+func (e *siteProbeError) Error() string {
+	return fmt.Sprintf("unifi: site probe failed (status=%d): %v", e.status, e.err)
+}
+
+func (e *siteProbeError) Unwrap() error { return e.err }
+
+// IsRetryableStartupError reports transient HTTP or timeout failures during a controller probe.
+func IsRetryableStartupError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var probe *siteProbeError
+	if errors.As(err, &probe) {
+		if probe.status >= 300 {
+			return probe.status == http.StatusTooManyRequests || (probe.status >= 500 && probe.status < 600)
+		}
+		err = probe.err
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.Temporary()
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	return false
+}
+
 // New probes the UniFi controller and returns the appropriate DNSProvider.
 // Only an unsupported modern endpoint falls back to legacy static-DNS.
 func New(ctx context.Context, cfg *Config) (DNSProvider, error) {
@@ -27,11 +65,17 @@ func New(ctx context.Context, cfg *Config) (DNSProvider, error) {
 	}
 	siteID, err := resolveSiteID(ctx, t, cfg)
 	if err == nil {
+		if cfg.ObserveProvider != nil {
+			cfg.ObserveProvider("modern")
+		}
 		return &modernProvider{transport: t, cfg: cfg, siteID: siteID}, nil
 	}
 	if err != errModernUnsupported {
 		t.CloseIdleConnections()
 		return nil, err
+	}
+	if cfg.ObserveProvider != nil {
+		cfg.ObserveProvider("legacy")
 	}
 	return &legacyProvider{transport: t, cfg: cfg}, nil
 }
@@ -46,7 +90,10 @@ func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, 
 			return "", errModernUnsupported
 		}
 		if err != nil {
-			return "", fmt.Errorf("unifi: site probe failed (status=%d): %w", status, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", fmt.Errorf("unifi: site probe failed (status=%d): %w", status, ctxErr)
+			}
+			return "", &siteProbeError{status: status, err: err}
 		}
 		var page struct {
 			Count      int `json:"count"`
@@ -120,7 +167,7 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 			}
 			all = append(all, DNSRecord{
 				ID: env.ID, Hostname: env.Domain, IP: env.IPv4Address,
-				RecordType: recordType, TTL: ttl,
+				RecordType: recordType, TTL: ttl, Disabled: !env.Enabled,
 			})
 		}
 		offset += len(page.Data)
@@ -149,10 +196,16 @@ func (p *modernProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 	if err := json.Unmarshal(data, &created); err != nil {
 		return "", fmt.Errorf("unifi: parse create response: %w", err)
 	}
+	if created.ID == "" {
+		return "", errors.New("unifi: create returned no record ID")
+	}
 	return created.ID, nil
 }
 
 func (p *modernProvider) DeleteRecord(ctx context.Context, unifiID string) error {
+	if unifiID == "" {
+		return errors.New("unifi: record ID required for delete")
+	}
 	url := fmt.Sprintf("%s/%s", p.policiesURL(), unifiID)
 	_, status, err := p.transport.do(ctx, http.MethodDelete, url, nil)
 	if err != nil && status != http.StatusNotFound {
@@ -191,6 +244,7 @@ func (p *legacyProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 		}
 		records = append(records, DNSRecord{
 			ID: e.ID, Hostname: e.Key, IP: e.Value, RecordType: e.RecordType, TTL: e.TTL,
+			Disabled: !e.Enabled,
 		})
 	}
 	return records, nil
@@ -219,6 +273,9 @@ func (p *legacyProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 }
 
 func (p *legacyProvider) DeleteRecord(ctx context.Context, unifiID string) error {
+	if unifiID == "" {
+		return errors.New("unifi: record ID required for delete")
+	}
 	url := fmt.Sprintf("%s/%s", p.baseURL(), unifiID)
 	_, status, err := p.transport.do(ctx, http.MethodDelete, url, nil)
 	if err != nil && status != http.StatusNotFound {

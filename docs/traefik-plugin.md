@@ -16,9 +16,9 @@ Choose the plugin when Traefik already fronts your services and you want no Dock
 
 ## Release status
 
-- Tag `v0.7.0` contains the plugin. It does **not** contain two later fixes: matching a site by its `internalReference`, and treating every named UniFi record (any type, enabled or not) as a reserved hostname. Those exist only in the repository working tree until a later release tag ships them.
-- With `v0.7.0`, set `unifiSite` to the site's display name (for example `Default`) or its UUID. The default value `default` does not match a real controller's display name.
+- Tag `v0.7.0` introduced the plugin. Set `unifiSite` to the display name (for example `Default`) or UUID when using that version.
+- Tag `v0.7.1` can match the site's `internalReference` and protects every named UniFi record from a duplicate plugin create, regardless of type or enabled state.
 - Catalog indexing is separate from a Git tag. A tag existing does not prove Traefik's plugin catalog serves it; use the [local plugin overlay](traefik/how-to.md#develop-with-a-local-plugin) when you cannot depend on the catalog.
 - Validated against Traefik `3.7.19`. Traefik plugin loading is experimental; revalidate before changing versions.
 
-The [reference](traefik/reference.md#release-differences) lists every difference between the released tag and the working tree.
+See [release differences](traefik/reference.md#release-differences) for behavior added after each tag.
