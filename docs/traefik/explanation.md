@@ -14,24 +14,24 @@ So the rule is simple: an existing name is never touched. Consequences operators
 
 - Removing a route, stopping Traefik, or changing `address` leaves DNS alone. Stale records are cleaned up by you.
 - A record pointing at the wrong IP stays wrong until you fix it. The plugin logs a conflict each poll to remind you.
-- It is safe to restart, upgrade, or crash Traefik at any time. No restart ever deletes anything.
+- A restart never deletes records. Use a [stop-before-start rollout](how-to.md#run-one-dns-writer-with-multiple-replicas) when replacing the writer.
 
 ## Why every named record reserves the name
 
-A hostname can be occupied by a disabled A record, a CNAME, or another type. Creating an A record next to a CNAME of the same name produces a broken or ambiguous zone, and UniFi may or may not reject it. So the unreleased code lists all named records and skips any discovered name that already has one. Release `v0.7.0` lists only enabled A records, so for it a CNAME or disabled record does not block creation. See the [release differences](reference.md#release-differences). The standalone controller deliberately keeps its narrower listing because it manages only its own enabled A records.
+A hostname can belong to a disabled A record, a CNAME, or another type. Since `v0.7.1`, every named record prevents the plugin from creating another record at that name. `v0.7.0` lists only enabled A records. See [release differences](reference.md#release-differences).
 
 ## What "concurrent" means here
 
-Inside one plugin instance, a single worker loop polls sequentially: no two polls overlap, and a failed create is isolated and retried on the next poll without blocking other names.
+Each provider polls sequentially. Provider instances sharing one loaded plugin runtime and the same normalized controller hostname also take turns from listing through creating. The guard is not keyed by site, so different names for the same site cannot bypass it. Stopping a provider waiting on the guard cancels the wait.
 
-Across instances, there is **no uniqueness guarantee**. Each instance lists records, decides a name is missing, then creates it. Two instances can both observe the name as absent, then both create it. What happens next belongs to UniFi:
+Traefik loads separately registered plugin aliases in separate interpreters. They do not share the guard, even in one process. Different controller hostnames, separate Traefik processes, and other tools also bypass it. Two writers outside the guard can see the same name as free and both try to create it. What happens next depends on UniFi:
 
 - If UniFi rejects the duplicate (for example with a 409), one record wins and the loser logs a failed create. The plugin never overwrites or retries blindly.
 - If UniFi accepts duplicates, both records exist, and the plugin will not delete either.
 
-Both outcomes are exercised by tests (`TestConcurrentCreatesServerRejectsDuplicate` and `TestBoundaryNoCrossInstanceUniquenessWhenServerAcceptsDuplicates`). The second is a documented boundary, not a safety claim. Matching target IPs do not prevent the duplicate.
+Both outcomes are covered by tests with a simulated remote writer. Matching target IPs do not prevent duplicates.
 
-Practical rule: **one writer per site and domain scope.** If you run several Traefik replicas, enable the plugin on exactly one. Any other tool that creates the same names counts as a second writer. There is no leader election because a stateless plugin has nowhere to store a lease.
+Run [one dedicated writer per site and domain scope](how-to.md#run-one-dns-writer-with-multiple-replicas). Any other tool that creates the same names counts as a second writer. The plugin has no cross-process lock or leader election.
 
 ## Why migration order matters
 

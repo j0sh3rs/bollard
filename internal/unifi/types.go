@@ -12,6 +12,7 @@ type DNSRecord struct {
 	IP         string
 	RecordType string
 	TTL        int
+	Disabled   bool
 }
 
 // Config holds UniFi connection parameters.
@@ -27,6 +28,11 @@ type Config struct {
 	// IncludeAllRecords lists every named policy (disabled and non-A included)
 	// so callers can detect occupied names. Default lists enabled A records only.
 	IncludeAllRecords bool
+	// ObserveRequest runs after every HTTP attempt, including retries. Status is
+	// zero if no response was received. The callback may run concurrently.
+	ObserveRequest func(method string, status int, elapsed time.Duration)
+	// ObserveProvider runs once per successful New with "modern" or "legacy".
+	ObserveProvider func(provider string)
 }
 
 func (c *Config) setDefaults() {

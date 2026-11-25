@@ -4,12 +4,19 @@
 
 ### Bug Fixes
 
-* resolve UniFi sites by their integration API `internalReference`, including the default site named `Default`
-* Traefik plugin treats every named UniFi DNS record (CNAME, disabled, any type) as occupying its hostname and never creates over it; concurrent plugin instances remain unguarded, so use a single writer per site/domain scope
+* Mask Postgres DSN passwords, including query credentials, in logs.
+* Exclude local credentials and Git history from container build contexts.
+* Retry failed DNS deletion during reconciliation, keep one owner per hostname during adoption, and release idle UniFi connections on shutdown and initialization failure.
+* Validate hostnames and preserve records already occupying them. Adoption skips disabled, non-A, and ambiguous records.
+* Reject UniFi list responses without a record list, treat HTTP 202 deletes as unfinished, and never adopt a policy whose wire type is literally `A`.
+* Retry transient UniFi startup failures and probe health on host-qualified metrics addresses.
+* Serialize Traefik plugin writes within a shared runtime. Separate plugin aliases and replicas still need one configured writer per site/domain scope.
 
-### Tests
+### Operational improvements
 
-* cover Docker pull stderr, repeated reconciliation, missing-record recovery, router removal, partial write failures, and target-IP conflicts
+* Record UniFi request, latency, and API selection metrics.
+* Stamp the build version in release binaries and images; expose it with `-version`.
+* Build and smoke-test the daemon image in CI against Docker and a simulated UniFi API.
 
 ## [0.7.1](https://github.com/j0sh3rs/bollard/compare/v0.7.0...v0.7.1) (2026-11-16)
 

@@ -34,7 +34,7 @@ UniFi Network API key, sent as `X-API-KEY`. Create it under the controller's adm
 
 ### `UNIFI_SITE`
 
-Site selector. Matched against the controller's site **name** or **ID**. On unreleased `main` it also matches the site's `internalReference`. Releases through v0.7.0 do not, so use the display name or UUID there. No match is a fatal startup error (`site "..." not found`).
+Site selector. Matched against the controller's site **name**, **ID**, or **internal reference** (since v0.7.1). No match is a fatal startup error (`site "..." not found`).
 
 ### `UNIFI_SKIP_TLS_VERIFY`
 
@@ -63,7 +63,7 @@ DATABASE_URL=postgres://bollard:secret@postgres:5432/bollard?sslmode=require
 
 - The default `file:bollard.db` is relative to the working directory. The image is `FROM scratch` with no volume, so that file is lost when the container is recreated. Always set an absolute path on a volume (as in the examples) unless you accept losing ownership state.
 - `file::memory:?cache=shared` keeps state in memory only; use it for testing.
-- For Postgres, prefer `sslmode=require` or stricter unless the database is on the same trusted host. The startup log masks the password.
+- For Postgres, prefer `sslmode=require` or stricter unless the database is on the same trusted host. The startup log masks the password, including `password` and `sslpassword` query parameters.
 - Switching backends does not copy data. Follow [Migrate the state store](operations.md#switch-the-state-store).
 - Run one bollard per store and per UniFi site.
 
@@ -79,7 +79,7 @@ Interval between reconcile ticks (Go duration such as `30s`, `5m`, `1h`), minimu
 
 Listen address for `/metrics` and `/healthz`. Neither endpoint is authenticated, and the default `:9090` listens on all interfaces (every interface when using `network_mode: host`). Bind to loopback or restrict with a firewall.
 
-The image `HEALTHCHECK` runs `/bollard -healthcheck`, which requests `http://localhost` + `$METRICS_ADDR` + `/healthz`. That works for `:PORT` values. A value with a host part such as `127.0.0.1:9090` builds an invalid URL and the container will be reported unhealthy; if you need loopback-only binding, keep `:PORT` and firewall it, or override the healthcheck.
+The image runs `/bollard -healthcheck` against the configured host and port. For example, `METRICS_ADDR=127.0.0.1:9090` restricts access to IPv4 loopback and keeps the healthcheck working. Use `[::1]:9090` for IPv6 loopback. Wildcard binds are probed over loopback.
 
 ## Command-line flags
 
@@ -87,12 +87,13 @@ The image `HEALTHCHECK` runs `/bollard -healthcheck`, which requests `http://loc
 |---|---|
 | `-adopt` / `--adopt` | Run the adopt phase before normal operation; see [Operations](operations.md#adopt-existing-records) |
 | `-healthcheck` | Request `/healthz` and exit 0 or 1; used by the image healthcheck |
+| `-version` | Print the installed build version and exit |
 
 ## Container labels
 
 | Label | Required | Default | Accepted values |
 |---|---|---|---|
-| `dns.bollard/hostname` | yes (opt-in) | — | non-empty string |
+| `dns.bollard/hostname` | yes (opt-in) | — | valid DNS hostname |
 | `dns.bollard/record-type` | no | `A` | `A` only |
 | `dns.bollard/ttl` | no | `300` | integer ≥ 0 |
 | `dns.bollard/ip-override` | no | inferred host IP | IPv4 address, or empty |
@@ -102,7 +103,7 @@ A container with an invalid label is **skipped** with a warning (`invalid labels
 
 ### `dns.bollard/hostname`
 
-Hostname to register. A missing or empty label means the container is not managed. bollard does not validate DNS syntax itself: pass a valid FQDN (for example `myapp.home.arpa`) and let UniFi reject bad names. Hostnames must be unique among records bollard owns.
+Hostname to register, such as `myapp.home.arpa`. A missing or empty label means the container is not managed. Names are folded to lowercase and one trailing dot is removed. Use ASCII letters, digits, and interior hyphens, with at most 63 bytes per label and 253 bytes total. IP literals are not hostnames. A name already present in the store or UniFi blocks creation.
 
 ### `dns.bollard/record-type`
 

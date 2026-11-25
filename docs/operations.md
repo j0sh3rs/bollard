@@ -22,15 +22,23 @@ Log messages you should recognise (abridged):
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
 | `orphaned store record, cleaning up` | A store row pointed at a UniFi record that no longer exists; row removed |
 | `reconcile failed` | Store or UniFi listing failed this tick |
-| `failed to delete unifi record` | UniFi delete failed after the store row was removed |
+| `failed to delete unifi record` | UniFi delete failed during a stop; the store row is kept and retried on the next reconcile tick |
+| `reconcile: deleted record for stopped container` | A record whose container is gone was deleted automatically (missed stop or failed delete) |
+| `metrics server listening` / `metrics listen failed` | The `/metrics` and `/healthz` listener started, or `METRICS_ADDR` could not be bound (the process exits non-zero) |
+| `UniFi unavailable; retrying` | A transient startup failure (connection refused or reset, timeout, 429, 5xx). The delay doubles from 500 ms to 30 s and the process keeps retrying |
+| `unifi client init error` | A permanent startup failure: bad key, invalid certificate, or unknown site. The process exits non-zero |
+| `docker event stream error` | The Docker event stream failed at runtime. The process exits non-zero and the restart policy reconnects |
+| `shutting down` | SIGTERM or SIGINT received. The process exits 0 |
 
-Startup failures exit non-zero and Docker restarts the container; read the last log line before the exit.
+While the controller is merely unreachable, bollard logs `UniFi unavailable; retrying` and keeps trying until it recovers or you stop it. `bollard_up` stays `0` during that time even though `/healthz` returns 200. Configuration, site, authentication, and certificate errors exit non-zero; read the last log line before the exit. See [UniFi error messages](#unifi-error-messages).
 
 ## Adopt existing records
 
 Use `--adopt` when the state store was lost or replaced and UniFi already holds the records, or when you moved bollard to a new host.
 
-What it does: for each running, enabled, labelled container without a store row, it looks for an enabled UniFi A record with the same hostname and IP. A match is written to the store; **no match causes the record to be created**. It never deletes records. After the phase completes, bollard continues into normal operation, so it does not exit.
+For each running, enabled, labelled container without a store row, bollard adopts only a sole enabled A record with the same hostname and IP. It creates a record if the name is free, and skips anything else. It never deletes during adoption, and continues into normal operation when the phase finishes.
+
+If two running containers carry the same `dns.bollard/hostname` label, only the first one processed gets a store row; the rest are rejected as hostname conflicts and logged (`adopt: hostname already owned, skipping` or a failed record creation). Fix the duplicate label — bollard enforces one container per hostname (see [Architecture](architecture.md)).
 
 1. Confirm the containers are running: `docker ps --filter label=dns.bollard/hostname`.
 2. Start bollard once with the flag:
@@ -50,7 +58,9 @@ Adopt does not touch records for containers that are no longer running; see the 
 
 ## Clean up stale records
 
-bollard deletes a record only when it sees the container's `die`/`destroy` event. If a container stopped while bollard was down, or an event was lost, reconcile will **not** remove the record. Find and remove them manually:
+bollard handles the common cases automatically: if the store still has a row for the container (stopped while bollard was down, lost `die` event, or a failed stop delete), the next reconcile tick deletes the record and logs `reconcile: deleted record for stopped container`. Manual cleanup remains only for records with **no** store row — for example after the store was reset or lost without running `--adopt`, or records created by other tools.
+
+For the no-row case, list the records and compare against running containers:
 
 ```bash
 # SQLite: owned records
@@ -61,15 +71,15 @@ psql "$DATABASE_URL" -c "SELECT hostname, ip, unifi_record_id FROM records ORDER
 docker ps --filter label=dns.bollard/hostname --format '{{.Names}}'
 ```
 
-Compare the two lists. For each hostname with no running container, delete the record in the UniFi DNS settings. On the next reconcile tick bollard notices the UniFi record is gone and removes the store row (`orphaned store record, cleaning up`). You do not need to edit the store.
+Compare the lists with UniFi DNS settings and a recent store backup. Delete a record only after confirming from the backup or deployment history that you own it and no service uses it. A missing row or Docker label alone does not prove the record is stale.
 
 If bollard is offline and you want records gone, delete them in UniFi; bollard cleans its store when it next runs.
 
-Records for stopped containers that you never delete stay in UniFi. Do not reset the store as a shortcut: with the store empty, bollard no longer knows those records are its own.
+Records for stopped containers with no store row stay in UniFi until deleted. Do not reset the store as a shortcut: with the store empty, bollard no longer knows those records are its own.
 
 ## Back up and restore the store
 
-The store maps containers to UniFi record IDs. Losing it does not change UniFi, but bollard cannot track or delete those records until you run `--adopt`.
+The store maps containers to UniFi record IDs. Losing it does not change UniFi. Restore a backup, or use `--adopt` to recover eligible records for running containers.
 
 **SQLite** (file path from `DATABASE_URL`, usually in a named volume). The image has no shell or `sqlite3`; run these on the host, against the volume's mount point (`docker volume inspect <volume>`):
 
@@ -99,7 +109,7 @@ There is no data copy between backends. To move from SQLite to Postgres (or back
 4. Check `state store ready owned_records=N` matches your running labelled containers.
 5. Remove `--adopt`.
 
-Records for containers that are no longer running are not adopted and will remain in UniFi untracked; clean them up as above before switching.
+Records for containers that are no longer running are not adopted; with no store row, reconcile will not delete them — clean them up as above before switching.
 
 ## Upgrade
 
@@ -115,10 +125,39 @@ Read the [CHANGELOG](../CHANGELOG.md) first for minor and major versions. Embedd
 
 Create a new key in UniFi, update `UNIFI_API_KEY`, run `docker compose up -d bollard` (environment changes need a recreate), then delete the old key.
 
+## Stop and restart
+
+bollard handles `SIGTERM` (`docker stop`) and `SIGINT`, stops the event loop, closes the store and idle UniFi connections, and exits `0`. This also applies while it is still retrying the controller at startup. Stopping never deletes DNS records; records for stopped containers are deleted only when bollard is running to see the stop, or on the next reconcile after it restarts.
+
+Any other exit is non-zero, so `restart: unless-stopped` restarts it. Environment changes need a container recreate (`docker compose up -d bollard`), not a restart.
+
+## UniFi error messages
+
+| Message | Cause | Action |
+|---|---|---|
+| `unifi: list records: response has no data` | The controller answered a record listing with no record list (`data` missing or `null`). bollard treats that as an error, not as an empty zone, because an empty answer would otherwise look like "nothing exists" and allow duplicate creates. A genuinely empty zone returns an empty list | Check the controller version and logs. If an otherwise healthy controller always answers this way, open an issue with the response body, redacting the API key |
+| `unifi: delete record <id> accepted but not completed` (also `legacy delete`) | The controller returned HTTP 202 for a delete, which means it was queued, not applied. The ownership row is kept and the delete is retried on the next reconcile | Usually clears by itself. If it repeats, check in UniFi whether the record is still present |
+| `unifi: site probe failed (status=N)` | The first request to the controller failed. 401/403 means a bad or under-privileged key | See [Getting started](getting-started.md#troubleshooting) |
+| `unifi: create returned no record ID` | The controller accepted a create but did not report an ID, so bollard cannot track it | Check UniFi for the record and remove it if it is a stray duplicate |
+
+## Verify a release
+
+Release images are built for `linux/amd64` and `linux/arm64`, carry provenance and an SBOM, and are signed with keyless Cosign from the release workflow. Release binaries and an SPDX SBOM are attached to each GitHub release with a `CHECKSUMS.sha256` file.
+
+```bash
+cosign verify ghcr.io/j0sh3rs/bollard:<tag> \
+  --certificate-identity-regexp '^https://github.com/j0sh3rs/bollard/\.github/workflows/release-please\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+sha256sum -c CHECKSUMS.sha256   # after downloading the binaries and checksum file
+```
+
+The running version appears in the `bollard starting` log line and in `bollard_build_info`. Builds that include the `-version` flag also print it with `/bollard -version`.
+
 ## Verify metrics
 
 ```bash
 curl -s localhost:9090/metrics | grep -E '^bollard_(up|records_active|reconcile_last_timestamp_seconds)'
 ```
 
-Which metrics are populated is documented in [Monitoring](monitoring.md); several declared metrics are not yet recorded.
+See [Monitoring](monitoring.md) for metric labels and alerting examples.

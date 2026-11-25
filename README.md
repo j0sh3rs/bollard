@@ -14,7 +14,7 @@ Automatically create UniFi DNS A records for self-hosted services. Choose the Tr
 | DNS target | Explicit client-reachable Traefik IPv4 address | Inferred host IPv4 or per-container override |
 | State | Rebuilt from Traefik and UniFi each poll; no database | Ownership database in SQLite or PostgreSQL |
 | Creates A records | Yes | Yes |
-| Deletes records | Never | Deletes owned records on observed container stop events; missed stops require manual cleanup |
+| Deletes records | Never | Deletes owned records on stop; reconciliation catches missed stops and retries failed deletes |
 | Docker socket required by Bollard | No | Yes |
 | Runs as | A Traefik provider plugin | A separate service |
 
@@ -38,16 +38,16 @@ Use the IPv4 address clients use to reach **Traefik**, not the nginx container a
 
 ### Released behavior versus current source
 
-This repository also contains changes not yet included in v0.7.0:
+v0.7.1 added two changes to the first plugin release:
 
-| Behavior | v0.7.0 | Current source |
+| Behavior | v0.7.0 | Since v0.7.1 |
 |---|---|---|
 | Modern UniFi site selection | Display name or site UUID | Also accepts `internalReference`, such as `default` for a site named `Default` |
 | Names protected against creation | Existing enabled A records | Every named record reported by UniFi, including CNAME and disabled records |
 
-For v0.7.0, configure the actual site display name or UUID. Do not assume the string `default` matches a site named `Default`. To test current source before a new release, follow the [local plugin instructions](docs/traefik/how-to.md).
+For v0.7.0, configure the actual site display name or UUID. For unreleased changes or an unindexed tag, follow the [local plugin instructions](docs/traefik/how-to.md).
 
-The plugin is **create-only**. Router removal, restart, and target-IP changes do not delete or update existing records. Run one writer for each site/domain scope: list-then-create cannot prevent duplicates across instances if UniFi accepts them. See [state and ownership explained](docs/traefik/explanation.md).
+The plugin is **create-only**. Router removal, restart, and target-IP changes do not modify existing records. Use one DNS writer per site/domain scope across Traefik replicas. See [plugin concurrency and ownership](docs/traefik/explanation.md).
 
 ## Start with the standalone controller
 
@@ -66,7 +66,7 @@ Use your actual site display name or UUID on the modern API; legacy controllers 
 ```yaml
 services:
   bollard:
-    image: ghcr.io/j0sh3rs/bollard:v0.7.0
+    image: ghcr.io/j0sh3rs/bollard:v0.7.1
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -106,16 +106,19 @@ The standalone controller historically defaults to skipping UniFi TLS verificati
 | Inspect standalone metrics and endpoint limits | [Monitoring](docs/monitoring.md) |
 | Adapt a deployment example | [Examples](docs/examples/) |
 | Check release history or future work | [Changelog](CHANGELOG.md), [roadmap](docs/ROADMAP.md) |
+| Contribute or report a security issue | [Contributing](CONTRIBUTING.md), [Security](SECURITY.md) |
 
 ## Development checks
 
 With the Go toolchain required by `go.mod`:
 
 ```sh
-go test -race . ./internal/unifi ./traefik
+go test -race ./...
 TRAEFIK_IMAGE=traefik:v3.7.19 go test -race ./traefik -run TestTraefikPlugin -v -count=1
+docker build --build-arg VERSION=v0.0.0-smoke -t bollard:smoke .
+BOLLARD_SMOKE_IMAGE=bollard:smoke go test -race . -run '^TestDaemonImageSmoke$' -count=1 -v
 ```
 
-The second command requires Docker. It loads the plugin in real Traefik, uses a mock UniFi controller, and verifies DNS creation and backend routing without contacting your live controller. Full CI also exercises the standalone packages and PostgreSQL tests with its configured database.
+The Docker-backed tests skip when their environment variable is unset. The Traefik test loads the plugin in real Traefik against a mock UniFi controller. The image smoke test runs the built image against an isolated Docker daemon and a simulated UniFi API. Set `TEST_POSTGRES_DSN` to include the PostgreSQL store tests. Neither test contacts your real controller. See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 Bollard does not configure client resolvers, replace authoritative DNS, or issue application TLS certificates. Those remain operator responsibilities.

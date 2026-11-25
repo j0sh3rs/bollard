@@ -8,7 +8,7 @@ what matters.
 
 ## Shipped
 
-### Standalone Docker daemon (through v0.7.0)
+### Standalone Docker daemon
 
 - [x] Docker event-driven A record lifecycle (create/delete)
 - [x] Label-driven opt-in (`dns.bollard/hostname`)
@@ -17,7 +17,7 @@ what matters.
 - [x] `--adopt` for state-store recovery (matches existing records; creates missing ones)
 - [x] UniFi modern API (DNS policies) with legacy static-DNS fallback, detected at startup
 - [x] Request retries with exponential backoff (429 always; 5xx for GET/DELETE)
-- [x] Prometheus metrics and `/healthz`. Note: the three `bollard_unifi_*` metrics are declared but not yet recorded (see [Monitoring](monitoring.md))
+- [x] Prometheus metrics and `/healthz` (see [Monitoring](monitoring.md))
 - [x] Structured logging (`logfmt`-style text or JSON)
 - [x] Multi-arch image (amd64/arm64) with SBOM and Cosign signing, SLSA provenance
 - [x] Renovate and release-please
@@ -26,13 +26,13 @@ what matters.
 
 - [x] **v0.7.0**: plugin that discovers Traefik router `Host()` names and creates missing UniFi A records. Create-only, stateless, no Docker socket. See [Traefik provider plugin](traefik-plugin.md).
 
-### Unreleased on `main` (not in v0.7.0)
+- [x] **v0.7.1**: Site lookup by `internalReference`, all named records block plugin creation, and additional reconcile coverage.
 
-- [ ] Site lookup by `internalReference` (affects the daemon and plugin)
-- [ ] Plugin treats every named UniFi record, of any type or enabled state, as occupying a hostname
-- [ ] Additional reconcile/concurrency tests
+### Next release
 
-Concurrent plugin instances remain unguarded; run one writer per site and domain scope.
+- Owned-record cleanup and safe adoption; ambiguous or unowned records stay untouched.
+- Controller startup retry, UniFi telemetry, hostname validation, and host-qualified health checks.
+- Shared-runtime plugin write coordination, daemon image smoke coverage, and build versions.
 
 ---
 
@@ -211,18 +211,14 @@ schema, leader election. Likely a separate repository.
 
 ---
 
-## Known gaps
+## Operational boundaries
 
-- **Reconcile does not delete UniFi records.** Records for containers that stopped while bollard was down, or whose `die` event was lost, stay until removed by hand. A reconcile pass that deletes owned records whose container is gone is the natural fix.
-- **Duplicate-hostname detection is store-only.** The daemon does not check UniFi for an existing record of the same name before creating.
-- **UniFi metrics not wired.** `bollard_unifi_requests_total`, `bollard_unifi_request_duration_seconds`, and `bollard_unifi_api_version` are declared but never recorded; `bollard_up` is never reset to `0`.
-- **Startup is fail-fast.** An unreachable UniFi controller exits the process rather than retrying in-process.
-- **Healthcheck URL.** `-healthcheck` breaks for `METRICS_ADDR` values with a host part.
-- **Label validation.** Hostnames are not syntax-checked.
-- **Default TLS verification is off** (`UNIFI_SKIP_TLS_VERIFY=true`). Flipping the default is a breaking change to weigh.
+- A DNS record without a corresponding store row has no proof of ownership. Recover live ownership with `--adopt` or manually verify stale records before removing them.
+- Traefik plugin aliases and replicas do not share a lock. Run a single DNS writer per site/domain scope; see [concurrency](traefik/explanation.md#what-concurrent-means-here).
+- The daemon defaults `UNIFI_SKIP_TLS_VERIFY` to `true` for self-signed deployments; configure [TLS verification](configuration.md#unifi_skip_tls_verify). The plugin verifies TLS by default.
 
 ## Open questions
 
-- **Duplicate hostname policy:** currently hard-errors on store conflicts. Configurable (`error` / `overwrite` / `first-wins`)?
+- **Duplicate hostname policy:** currently rejects occupied names. Should this remain the only policy?
 - **Record TTL drain on stop:** immediate delete vs TTL drain.
 - **Auth hardening:** API key via env var only; Docker secrets support is listed above.

@@ -121,6 +121,31 @@ func TestCreateAndDeleteRecord_Modern(t *testing.T) {
 	}
 }
 
+func TestModernCreateRequiresRecordID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"count":1,"totalCount":1,"data":[{"id":"site-uuid","name":"default"}]}`)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"domain":"test.home.arpa"}`)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	p, err := unifi.New(context.Background(), newTestConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CreateRecord(context.Background(), unifi.DNSRecord{Hostname: "test.home.arpa"}); err == nil {
+		t.Fatal("accepted a create response with no ID")
+	}
+	if err := p.DeleteRecord(context.Background(), ""); err == nil {
+		t.Fatal("accepted a delete without a record ID")
+	}
+}
+
 // TestNew_LegacyFallback verifies that when the modern API probe returns 404,
 // New() falls back to the legacy provider.
 func TestNew_LegacyFallback(t *testing.T) {
@@ -592,6 +617,89 @@ func TestListRecords_Pagination(t *testing.T) {
 			}
 			if err != nil || len(records) != 2 || records[1].ID != "two" {
 				t.Fatalf("expected both records, got %+v, %v", records, err)
+			}
+		})
+	}
+}
+
+func TestMalformedListResponsesAreRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name, modern, legacy string
+	}{
+		{"missing data", `{}`, `null`},
+		{"null data", `{"data":null,"count":0,"totalCount":0}`, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []string{"modern", "legacy"} {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.URL.Path == "/proxy/network/integration/v1/sites" && mode == "modern":
+						fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}],"count":1,"totalCount":1}`)
+					case r.URL.Path == "/proxy/network/integration/v1/sites/site/dns/policies" && mode == "modern":
+						fmt.Fprint(w, tc.modern)
+					case r.URL.Path == "/proxy/network/v2/api/site/default/static-dns" && mode == "legacy":
+						fmt.Fprint(w, tc.legacy)
+					default:
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				cfg := newTestConfig(srv.URL)
+				cfg.IncludeAllRecords = true
+				p, err := unifi.New(context.Background(), cfg)
+				if err != nil {
+					srv.Close()
+					t.Fatalf("%s New: %v", mode, err)
+				}
+				if _, err := p.ListRecords(context.Background()); err == nil {
+					t.Errorf("%s listing accepted malformed response", mode)
+				}
+				srv.Close()
+			}
+		})
+	}
+}
+
+func TestModernWireTypeAIsNotAdoptableARecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/proxy/network/integration/v1/sites" {
+			fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}],"count":1,"totalCount":1}`)
+			return
+		}
+		fmt.Fprint(w, `{"data":[{"id":"bad","type":"A","enabled":true,"domain":"web.home.arpa","ipv4Address":"192.0.2.10"}],"count":1,"totalCount":1}`)
+	}))
+	defer srv.Close()
+	cfg := newTestConfig(srv.URL)
+	cfg.IncludeAllRecords = true
+	p, err := unifi.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := p.ListRecords(context.Background())
+	if err != nil || len(records) != 1 || records[0].RecordType == "A" {
+		t.Fatalf("modern wire type A became adoptable: %+v, %v", records, err)
+	}
+}
+
+func TestDeleteAcceptedIsNotCompleted(t *testing.T) {
+	for _, mode := range []string{"modern", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/proxy/network/integration/v1/sites" && mode == "modern":
+					fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}],"count":1,"totalCount":1}`)
+				case r.Method == http.MethodDelete:
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			p, err := unifi.New(context.Background(), newTestConfig(srv.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.DeleteRecord(context.Background(), "pending"); err == nil {
+				t.Fatal("accepted delete was reported as completed")
 			}
 		})
 	}

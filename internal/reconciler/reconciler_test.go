@@ -8,16 +8,25 @@ import (
 	"time"
 
 	"github.com/j0sh3rs/bollard/internal/docker"
+	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/reconciler"
 	"github.com/j0sh3rs/bollard/internal/store"
 	"github.com/j0sh3rs/bollard/internal/unifi"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
-type fakeStore struct{ records map[string]store.Record }
+type fakeStore struct {
+	records   map[string]store.Record
+	createErr error
+}
 
 func newFakeStore() *fakeStore { return &fakeStore{records: map[string]store.Record{}} }
 
 func (f *fakeStore) Create(_ context.Context, r store.Record) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	if _, exists := f.records[r.ContainerID]; exists {
 		return fmt.Errorf("duplicate container_id %s", r.ContainerID)
 	}
@@ -58,21 +67,33 @@ func (f *fakeStore) Close() error { return nil }
 
 type fakeLister struct {
 	containers map[string]map[string]string
+	listErr    error
 }
 
 func (f *fakeLister) ListRunning(_ context.Context) (map[string]map[string]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.containers, nil
 }
 
 type fakeProvider struct {
-	records map[string]unifi.DNSRecord
-	nextID  int
+	records           map[string]unifi.DNSRecord
+	nextID            int
+	listCalls         int
+	listErr           error
+	deleteErr         error
+	createResponseErr error
 }
 
 func newFakeProvider() *fakeProvider {
 	return &fakeProvider{records: map[string]unifi.DNSRecord{}}
 }
 func (f *fakeProvider) ListRecords(_ context.Context) ([]unifi.DNSRecord, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	var out []unifi.DNSRecord
 	for _, r := range f.records {
 		out = append(out, r)
@@ -84,9 +105,15 @@ func (f *fakeProvider) CreateRecord(_ context.Context, r unifi.DNSRecord) (strin
 	id := fmt.Sprintf("unifi-%d", f.nextID)
 	r.ID = id
 	f.records[id] = r
+	if f.createResponseErr != nil {
+		return "", f.createResponseErr
+	}
 	return id, nil
 }
 func (f *fakeProvider) DeleteRecord(_ context.Context, id string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.records, id)
 	return nil
 }
@@ -161,5 +188,324 @@ func TestHandleEvent_DuplicateHostname(t *testing.T) {
 	}
 	if len(p.records) != 1 {
 		t.Errorf("expected exactly 1 unifi record, got %d", len(p.records))
+	}
+}
+
+func TestHandleStop_KeepsStoreRowWhenProviderFails(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.deleteErr = fmt.Errorf("unifi unavailable")
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-1", ContainerID: "container-789",
+		Hostname: "stopped.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-stopped",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-stopped"] = unifi.DNSRecord{
+		ID: "unifi-stopped", Hostname: "stopped.home.arpa", IP: "192.168.1.1",
+	}
+
+	err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-789",
+	})
+	if err == nil {
+		t.Fatal("expected error when provider delete fails")
+	}
+	rec, _ := s.GetByContainerID(context.Background(), "container-789")
+	if rec == nil {
+		t.Error("expected store row kept when provider delete fails")
+	}
+	if _, ok := p.records["unifi-stopped"]; !ok {
+		t.Error("expected unifi record to remain when delete fails")
+	}
+}
+
+func TestHandleStop_DeletesRowAndRecord(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-2", ContainerID: "container-ok",
+		Hostname: "ok.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-ok",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-ok"] = unifi.DNSRecord{
+		ID: "unifi-ok", Hostname: "ok.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-ok",
+	}); err != nil {
+		t.Fatalf("HandleEvent stop: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-ok"); rec != nil {
+		t.Error("expected store row removed after stop")
+	}
+	if len(p.records) != 0 {
+		t.Errorf("expected unifi record deleted after stop, got %d", len(p.records))
+	}
+}
+
+func TestReconcile_RetriesDeleteForStoppedContainer(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-3", ContainerID: "container-dead",
+		Hostname: "dead.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead"] = unifi.DNSRecord{
+		ID: "unifi-dead", Hostname: "dead.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead"); rec != nil {
+		t.Error("expected store row deleted by retry pass")
+	}
+	if _, ok := p.records["unifi-dead"]; ok {
+		t.Error("expected unifi record deleted by retry pass")
+	}
+}
+
+func TestReconcile_RetryFailureKeepsRow(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.deleteErr = fmt.Errorf("unifi unavailable")
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-4", ContainerID: "container-dead2",
+		Hostname: "dead2.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead2",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead2"] = unifi.DNSRecord{
+		ID: "unifi-dead2", Hostname: "dead2.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile must not fail when a retry delete fails: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead2"); rec == nil {
+		t.Error("expected store row kept for retry on next tick")
+	}
+	if _, ok := p.records["unifi-dead2"]; !ok {
+		t.Error("expected unifi record to remain when retry delete fails")
+	}
+}
+
+func TestReconcile_RunningContainerNotTouched(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-live": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-5", ContainerID: "container-live",
+		Hostname: "live.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-live",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-live"] = unifi.DNSRecord{
+		ID: "unifi-live", Hostname: "live.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-live"); rec == nil {
+		t.Error("expected store row for running container to remain")
+	}
+	if _, ok := p.records["unifi-live"]; !ok {
+		t.Error("expected unifi record for running container to remain")
+	}
+}
+
+func TestReconcile_ListRunningErrorSkipsDeletes(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{listErr: fmt.Errorf("docker down")}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-6", ContainerID: "container-dead3",
+		Hostname: "dead3.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-dead3",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-dead3"] = unifi.DNSRecord{
+		ID: "unifi-dead3", Hostname: "dead3.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile must not fail when ListRunning fails: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-dead3"); rec == nil {
+		t.Error("expected no deletes when ListRunning fails")
+	}
+	if _, ok := p.records["unifi-dead3"]; !ok {
+		t.Error("expected no record deletes when ListRunning fails")
+	}
+}
+
+func TestReconcile_SkipsDeleteWhenRecordSharedWithRunningRow(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-a": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-a", ContainerID: "container-a",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-b", ContainerID: "container-b",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-shared"] = unifi.DNSRecord{
+		ID: "unifi-shared", Hostname: "dup.home.arpa", IP: "192.168.1.1",
+	}
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-b"); rec == nil {
+		t.Error("expected stopped row kept while record is shared with a running row")
+	}
+	if _, ok := p.records["unifi-shared"]; !ok {
+		t.Error("expected shared unifi record to remain")
+	}
+}
+
+func TestHandleStop_SkipsDeleteWhenRecordSharedWithRunning(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-a": {}}}, "192.168.1.1", nil, slog.Default())
+
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-a", ContainerID: "container-a",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	_ = s.Create(context.Background(), store.Record{
+		ID: "rec-b", ContainerID: "container-b",
+		Hostname: "dup.home.arpa", IP: "192.168.1.1", RecordType: "A",
+		TTL: 300, UnifiRecordID: "unifi-shared",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-shared"] = unifi.DNSRecord{
+		ID: "unifi-shared", Hostname: "dup.home.arpa", IP: "192.168.1.1",
+	}
+
+	err := r.HandleEvent(context.Background(), docker.Event{
+		Type: "stop", ContainerID: "container-b",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error when record is shared with a running container: %v", err)
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-b"); rec == nil {
+		t.Error("expected stopped row kept when record is shared")
+	}
+	if _, ok := p.records["unifi-shared"]; !ok {
+		t.Error("expected shared unifi record untouched")
+	}
+}
+
+func TestAdopt_DuplicateHostnameSkipsSecond(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-web"] = unifi.DNSRecord{
+		ID: "unifi-web", Hostname: "WEB.Home.Arpa.", IP: "192.168.1.1", RecordType: "A",
+	}
+	conflicts := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_hostname_conflicts_total"})
+	m := &metrics.Metrics{
+		HostnameConflictsTotal: conflicts,
+		RecordsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_records_total"},
+			[]string{"action", "success"}),
+	}
+	r := reconciler.New(s, p, nil, "192.168.1.1", m, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
+		"container-b": {"dns.bollard/hostname": "Web.home.arpa."},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if len(s.records) != 1 {
+		t.Fatalf("expected exactly 1 store row, got %d", len(s.records))
+	}
+	for _, rec := range s.records {
+		if rec.UnifiRecordID != "unifi-web" {
+			t.Errorf("expected adopted row to point at unifi-web, got %s", rec.UnifiRecordID)
+		}
+	}
+	var sample dto.Metric
+	if err := conflicts.Write(&sample); err != nil {
+		t.Fatalf("write conflict metric: %v", err)
+	}
+	if got := sample.GetCounter().GetValue(); got != 1 {
+		t.Errorf("hostname conflicts = %v, want 1", got)
+	}
+}
+
+func TestAdopt_DuplicateHostnameDifferentIP(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-web"] = unifi.DNSRecord{
+		ID: "unifi-web", Hostname: "web.home.arpa", IP: "192.168.1.1", RecordType: "A",
+	}
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-a": {"dns.bollard/hostname": "web.home.arpa"},
+		// An occupied name with a different IP is not a creation candidate.
+		"container-b": {"dns.bollard/hostname": "web.home.arpa", "dns.bollard/ip-override": "10.0.0.5"},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt must be non-fatal on conflict: %v", err)
+	}
+	// Only the container whose address matches may own the existing record.
+	if len(s.records) != 1 {
+		t.Fatalf("expected exactly 1 store row for hostname web, got %d", len(s.records))
+	}
+	for containerID, rec := range s.records {
+		if containerID != "container-a" || rec.UnifiRecordID != "unifi-web" || rec.Hostname != "web.home.arpa" {
+			t.Fatalf("unexpected owner %s: %+v", containerID, rec)
+		}
+	}
+}
+
+func TestAdopt_NoDuplicateSingleContainer(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	p.records["unifi-only"] = unifi.DNSRecord{
+		ID: "unifi-only", Hostname: "Only.HOME.arpa.", IP: "192.168.1.1", RecordType: "A",
+	}
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+
+	running := map[string]map[string]string{
+		"container-1": {"dns.bollard/hostname": "only.home.arpa"},
+	}
+	if err := r.Adopt(context.Background(), running); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if len(s.records) != 1 {
+		t.Fatalf("expected 1 store row, got %d", len(s.records))
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-1"); rec == nil ||
+		rec.UnifiRecordID != "unifi-only" || rec.Hostname != "only.home.arpa" {
+		t.Fatal("expected container-1 to adopt unifi-only")
 	}
 }

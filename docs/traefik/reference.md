@@ -4,13 +4,13 @@ Exact behavior of the plugin, taken from `traefik/provider.go`, `traefik/rules.g
 
 ## Release differences
 
-| Behavior | Release `v0.7.0` | Repository working tree (not yet released) |
-|---|---|---|
-| `unifiSite` match (modern API) | Site `name` or `id` only. Real controllers report `internalReference: "default"`, `name: "Default"`, so the default `default` is not found. Use `Default` or the UUID. | Also matches `internalReference`. `default` works. |
-| Existing-record check | Lists **enabled A** records only. A disabled A record or any CNAME on the name is invisible, so the plugin tries to create the name. | Lists **every named record** (any type, enabled or not). Each reserves its name; nothing is created for it. |
-| Docker controller listing | Enabled A records only | Unchanged: enabled A records only |
+| Behavior | v0.7.0 | v0.7.1 | Current source |
+|---|---|---|---|
+| `unifiSite` match (modern API) | Display name or UUID | Also matches internal references such as `default` | Same as v0.7.1 |
+| Existing-record check | Enabled A records only | All named records | All named records |
+| Write coordination | None | None | Serialized within a shared plugin runtime for the same controller hostname; not across aliases or replicas |
 
-Pin examples to `v0.7.0` and write the display name or UUID until a later tag containing the fixes exists. Catalog indexing of any tag is separate and unverified by this documentation.
+Release tags do not guarantee catalog availability. Use the [local plugin overlay](how-to.md#develop-with-a-local-plugin) if the version you need is not served.
 
 ## Registration
 
@@ -38,7 +38,7 @@ All fields sit under `providers.plugin.<name>` in **static** configuration.
 | `unifiHost` | none | yes | UniFi controller base URL. |
 | `unifiAPIKeyFile` | none | one of | File containing the API key. Recommended. |
 | `unifiAPIKey` | none | one of | Inline API key. Exactly one key source. |
-| `unifiSite` | `default` | no | Site name, UUID, or (unreleased) internal reference. |
+| `unifiSite` | `default` | no | Site name, UUID, or internal reference (since v0.7.1). |
 | `unifiCACert` | none (empty = unset) | no | PEM CA file path inside the Traefik container. |
 | `unifiSkipTLSVerify` | `false` | no | Disables TLS verification. Ignored when `unifiCACert` is set. |
 | `address` | none | yes | IPv4 address written to every created record. |
@@ -143,6 +143,10 @@ If the first sites request returns 404, 405, or 501, the client falls back to th
 | `POST /proxy/network/v2/api/site/<unifiSite>/static-dns` | Create `key`, `value`, `record_type: "A"`, `ttl: 300`, `enabled: true`. |
 
 Any other site-probe failure is an error and does not fall back.
+
+### Response handling
+
+The plugin only lists and creates, so it never sends `DELETE`. In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`).
 
 ## Limits
 

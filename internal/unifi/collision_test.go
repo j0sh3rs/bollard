@@ -78,6 +78,11 @@ func TestListRecords_IncludeAllRecords(t *testing.T) {
 			if recs[1].RecordType == "A" || recs[1].Hostname != "Cname.Example.com." {
 				t.Errorf("CNAME not retained as non-A: %+v", recs[1])
 			}
+			for i, want := range []bool{false, false, true, true} {
+				if recs[i].Disabled != want {
+					t.Errorf("record %s Disabled = %t, want %t", recs[i].ID, recs[i].Disabled, want)
+				}
+			}
 		})
 	}
 }

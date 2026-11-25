@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 )
 
 const (
@@ -33,8 +35,12 @@ func ParseLabels(labels map[string]string) (*RecordSpec, error) {
 	if !ok || hostname == "" {
 		return nil, nil
 	}
+	canonical := dnsname.Canonical(hostname)
+	if !dnsname.Valid(canonical) {
+		return nil, fmt.Errorf("label %s: invalid hostname %q", labelHostname, hostname)
+	}
 	spec := &RecordSpec{
-		Hostname:   hostname,
+		Hostname:   canonical,
 		RecordType: defaultRecordType,
 		TTL:        defaultTTL,
 		Enabled:    true,

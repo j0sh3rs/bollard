@@ -32,7 +32,7 @@ type fixture struct {
 }
 
 func newFixture(t *testing.T) *fixture {
-	f := &fixture{t: t, failPost: map[string]bool{}}
+	f := &fixture{t: t, failPost: map[string]bool{}, records: []map[string]any{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
 	return f

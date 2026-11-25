@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 	"github.com/j0sh3rs/bollard/internal/unifi"
 )
 
@@ -44,17 +45,18 @@ func CreateConfig() *Config {
 
 // Provider discovers routers independently of incoming HTTP requests.
 type Provider struct {
-	ctx         context.Context
-	api         string
-	address     string
-	interval    time.Duration
-	unifiConfig *unifi.Config
-	dns         unifi.DNSProvider
-	client      *http.Client
-	logger      *log.Logger
-	mu          sync.Mutex
-	cancel      context.CancelFunc
-	done        chan struct{}
+	ctx            context.Context
+	api            string
+	address        string
+	interval       time.Duration
+	controllerHost string
+	unifiConfig    *unifi.Config
+	dns            unifi.DNSProvider
+	client         *http.Client
+	logger         *log.Logger
+	mu             sync.Mutex
+	cancel         context.CancelFunc
+	done           chan struct{}
 }
 
 // New validates configuration. Network access starts only in Provide.
@@ -100,9 +102,10 @@ func New(ctx context.Context, config *Config, name string) (*Provider, error) {
 		return nil, fmt.Errorf("bollard: a nonempty UniFi API key is required")
 	}
 	return &Provider{
-		ctx: ctx, api: api, address: ip.To4().String(), interval: interval,
+		ctx: ctx, api: strings.TrimRight(api.String(), "/"), address: ip.To4().String(), interval: interval,
+		controllerHost: controllerHost(host.Hostname()),
 		unifiConfig: &unifi.Config{
-			Host: host, APIKey: key, Site: site,
+			Host: strings.TrimRight(host.String(), "/"), APIKey: key, Site: site,
 			CACertPath: config.UnifiCACert, SkipTLSVerify: config.UnifiSkipTLSVerify,
 			IncludeAllRecords: true,
 		},
@@ -116,12 +119,20 @@ func New(ctx context.Context, config *Config, name string) (*Provider, error) {
 	}, nil
 }
 
-func baseURL(raw string) (string, error) {
+func baseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("expected HTTP(S) URL without credentials, query, or fragment")
+		return nil, fmt.Errorf("expected HTTP(S) URL without credentials, query, or fragment")
 	}
-	return strings.TrimRight(u.String(), "/"), nil
+	return u, nil
+}
+
+func controllerHost(host string) string {
+	host = dnsname.Canonical(host)
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
 }
 
 // Init satisfies the Traefik provider contract; New already validates configuration.
@@ -160,7 +171,7 @@ func (p *Provider) Provide(configuration chan<- json.Marshaler) error {
 	return nil
 }
 
-// Stop cancels in-flight requests and waits for the worker. DNS records remain intact.
+// Stop cancels in-flight requests and waits for the worker, then releases idle UniFi connections. DNS records remain intact.
 func (p *Provider) Stop() error {
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
@@ -170,7 +181,59 @@ func (p *Provider) Stop() error {
 		<-done
 	}
 	p.client.CloseIdleConnections()
+	if closer, ok := p.dns.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 	return nil
+}
+
+type controllerGate struct {
+	slot chan struct{}
+	refs int // holders and waiters; no idle entries remain
+}
+
+var (
+	controllerMu    sync.Mutex
+	controllerGates = make(map[string]*controllerGate)
+)
+
+func lockController(ctx context.Context, host string) (*controllerGate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	controllerMu.Lock()
+	gate := controllerGates[host]
+	if gate == nil {
+		gate = &controllerGate{slot: make(chan struct{}, 1)}
+		controllerGates[host] = gate
+	}
+	gate.refs++
+	controllerMu.Unlock()
+
+	select {
+	case gate.slot <- struct{}{}:
+		if ctx.Err() == nil {
+			return gate, nil
+		}
+		<-gate.slot
+	case <-ctx.Done():
+	}
+	releaseController(host, gate)
+	return nil, ctx.Err()
+}
+
+func releaseController(host string, gate *controllerGate) {
+	controllerMu.Lock()
+	gate.refs--
+	if gate.refs == 0 {
+		delete(controllerGates, host)
+	}
+	controllerMu.Unlock()
+}
+
+func unlockController(host string, gate *controllerGate) {
+	<-gate.slot
+	releaseController(host, gate)
 }
 
 func (p *Provider) reconcile(ctx context.Context) error {
@@ -178,6 +241,14 @@ func (p *Provider) reconcile(ctx context.Context) error {
 	if err != nil || len(hosts) == 0 {
 		return err
 	}
+
+	// Different site names can resolve to the same site, so serialize by controller.
+	gate, err := lockController(ctx, p.controllerHost)
+	if err != nil {
+		return err
+	}
+	defer unlockController(p.controllerHost, gate)
+
 	if p.dns == nil {
 		p.dns, err = unifi.New(ctx, p.unifiConfig)
 		if err != nil {
@@ -189,7 +260,7 @@ func (p *Provider) reconcile(ctx context.Context) error {
 		return fmt.Errorf("list UniFi records: %w", err)
 	}
 	for _, record := range records {
-		host := strings.ToLower(strings.TrimSuffix(record.Hostname, "."))
+		host := dnsname.Canonical(record.Hostname)
 		if hosts[host] && record.IP != p.address {
 			p.logger.Printf("DNS conflict for %s: existing record preserved", host)
 		}
