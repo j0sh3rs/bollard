@@ -33,7 +33,7 @@ Use `--adopt` when the state store was lost or replaced and UniFi already holds 
 
 What it does: for each running, enabled, labelled container without a store row, it looks for an enabled UniFi A record with the same hostname and IP. A match is written to the store; **no match causes the record to be created**. It never deletes records. After the phase completes, bollard continues into normal operation, so it does not exit.
 
-If two running containers carry the same `dns.bollard/hostname` label, only the first one is adopted; the rest are skipped and logged as `adopt: hostname already owned, skipping`. Fix the duplicate label — bollard enforces one container per hostname (see [Architecture](architecture.md)).
+If two running containers carry the same `dns.bollard/hostname` label, only the first one processed gets a store row; the rest are rejected as hostname conflicts and logged (`adopt: hostname already owned, skipping` or a failed record creation). Fix the duplicate label — bollard enforces one container per hostname (see [Architecture](architecture.md)).
 
 1. Confirm the containers are running: `docker ps --filter label=dns.bollard/hostname`.
 2. Start bollard once with the flag:
