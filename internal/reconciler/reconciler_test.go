@@ -445,20 +445,17 @@ func TestAdopt_DuplicateHostnameDifferentIP(t *testing.T) {
 	if err := r.Adopt(context.Background(), running); err != nil {
 		t.Fatalf("Adopt must be non-fatal on conflict: %v", err)
 	}
-	rec, _ := s.GetByContainerID(context.Background(), "container-a")
-	if rec == nil || rec.UnifiRecordID != "unifi-web" {
-		t.Fatal("expected container-a to adopt unifi-web")
+	// Whichever duplicate container is processed first owns the hostname;
+	// the other is rejected (found-branch guard or handleStart conflict).
+	// Exactly one row must remain, under the hostname — no two rows may
+	// share it, no two rows may share a UnifiRecordID.
+	if len(s.records) != 1 {
+		t.Fatalf("expected exactly 1 store row for hostname web, got %d", len(s.records))
 	}
-	// The regression this plan fixes: no two store rows may share a
-	// UnifiRecordID. Depending on map iteration order, container-b is
-	// rejected with a hostname conflict (1 row) or creates its own record
-	// first (2 rows with distinct record IDs).
-	seen := map[string]struct{}{}
-	for _, r := range s.records {
-		if _, dup := seen[r.UnifiRecordID]; dup {
-			t.Fatalf("store has two rows pointing at record %s", r.UnifiRecordID)
+	for _, rec := range s.records {
+		if rec.Hostname != "web.home.arpa" {
+			t.Fatalf("store row has hostname %q, want web.home.arpa", rec.Hostname)
 		}
-		seen[r.UnifiRecordID] = struct{}{}
 	}
 }
 

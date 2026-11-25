@@ -334,8 +334,8 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 		unifiByKey[key{ur.Hostname, ur.IP}] = ur
 	}
 
-	// Hostnames already owned by any store row before this run; a second
-	// adopt for the same hostname is a conflict, not an overwrite.
+	// Hostnames owned by any store row — before this run or written during
+	// it. A second adopt for the same hostname is a conflict, not an overwrite.
 	ownedHostnames := map[string]struct{}{}
 	all, err := r.store.ListAll(ctx)
 	if err != nil {
@@ -388,6 +388,8 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 				Type: "start", ContainerID: containerID, Labels: labels,
 			}); err != nil {
 				r.log.Error("adopt: create record failed", "container", containerID, "err", err)
+			} else {
+				ownedHostnames[spec.Hostname] = struct{}{}
 			}
 		}
 	}
