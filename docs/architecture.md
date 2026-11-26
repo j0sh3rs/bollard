@@ -109,7 +109,7 @@ So adopt can create records; it never deletes any. See [Operations](operations.m
 - Redirects are not followed.
 - API selection lasts for the lifetime of the daemon or plugin provider. Restart after a controller API upgrade to probe again.
 - List responses must contain a record list. A missing or `null` list is an error, not an empty zone, so a malformed answer cannot make existing names look free.
-- Each paginated listing (sites and records) stops with an error after 100,000 entries or 60 seconds. An error, never a truncated list, so a controller that reports a huge `totalCount` cannot wedge the event loop or make existing names look free.
+- Paginated listings (sites and records) are bounded: the 60-second deadline applies to each listing, and a listing that is still not finished after crossing 100,000 entries stops with an error rather than a truncated list. The check runs after each page, so a listing that ends on the page that crosses the limit still succeeds, and a site match found earlier is returned first.
 - A modern or legacy `DELETE` that returns 404 counts as success. HTTP 202 is an error (`accepted but not completed`) because the delete may not have been applied; the ownership row is kept for retry.
 - The daemon records one request counter and one latency observation per attempt (see [Monitoring](monitoring.md#unifi-api)). The plugin does not export metrics.
 

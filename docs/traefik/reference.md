@@ -151,7 +151,7 @@ Any other site-probe failure is an error and does not fall back.
 
 ### Response handling
 
-The plugin lists and creates during polling, and deletes only at shutdown (see [Record shape](#record-shape)). In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`). A listing stops with an error after 100,000 records or 60 seconds.
+The plugin lists and creates during polling, and deletes only at shutdown (see [Record shape](#record-shape)). In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`). Each listing has a 60-second deadline, and pagination that is still unfinished after crossing 100,000 entries stops with an error instead of returning a truncated list. The check runs after each page, so the final page can carry a listing past 100,000.
 
 ## Limits
 
