@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 )
 
 // DNSProvider is the interface bollard uses to manage UniFi DNS records.
@@ -80,8 +81,17 @@ func New(ctx context.Context, cfg *Config) (DNSProvider, error) {
 	return &legacyProvider{transport: t, cfg: cfg}, nil
 }
 
+// maxListRecords and listTimeout bound a paginated listing so a controller that reports a huge
+// totalCount with tiny pages cannot wedge the single event loop or grow memory without limit.
+const (
+	maxListRecords = 100000
+	listTimeout    = 60 * time.Second
+)
+
 func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, error) {
 	const pageLimit = 200
+	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	defer cancel()
 	offset := 0
 	for {
 		url := fmt.Sprintf("%s/proxy/network/integration/v1/sites?offset=%d&limit=%d", cfg.Host, offset, pageLimit)
@@ -119,6 +129,9 @@ func resolveSiteID(ctx context.Context, t *httpTransport, cfg *Config) (string, 
 		if offset >= page.TotalCount {
 			return "", fmt.Errorf("unifi: site %q not found", cfg.Site)
 		}
+		if offset > maxListRecords {
+			return "", fmt.Errorf("unifi: more than %d sites", maxListRecords)
+		}
 	}
 }
 
@@ -138,6 +151,8 @@ func (p *modernProvider) policiesURL() string {
 
 func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 	const pageLimit = 200
+	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	defer cancel()
 	var all []DNSRecord
 	offset := 0
 	for {
@@ -179,6 +194,9 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 		offset += len(page.Data)
 		if offset >= page.TotalCount {
 			break
+		}
+		if offset > maxListRecords {
+			return nil, fmt.Errorf("unifi: list records: more than %d records", maxListRecords)
 		}
 	}
 	return all, nil

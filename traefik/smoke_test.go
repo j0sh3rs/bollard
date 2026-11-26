@@ -29,6 +29,7 @@ func TestTraefikPlugin(t *testing.T) {
 	var mu sync.Mutex
 	policies := []map[string]interface{}{}
 	created := make(chan struct{}, 1)
+	deleted := make(chan struct{}, 1)
 	mock := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -39,6 +40,15 @@ func TestTraefikPlugin(t *testing.T) {
 		if r.Header.Get("X-API-KEY") != "smoke-key" {
 			t.Error("missing API key at mock controller")
 			w.WriteHeader(401)
+			return
+		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/proxy/network/integration/v1/sites/smoke-site/dns/policies/smoke-record" {
+			policies = policies[:0]
+			w.WriteHeader(http.StatusNoContent)
+			select {
+			case deleted <- struct{}{}:
+			default:
+			}
 			return
 		}
 		switch r.URL.Path {
@@ -163,6 +173,11 @@ providers:
 		defer stopCancel()
 		if out, err := exec.CommandContext(stopCtx, "docker", "stop", "--time", "5", id).CombinedOutput(); err != nil {
 			t.Errorf("stop Traefik: %v\n%s", err, out)
+		}
+		select {
+		case <-deleted:
+		case <-time.After(5 * time.Second):
+			t.Error("Traefik shutdown did not delete the record the plugin created")
 		}
 		logs, _ := exec.CommandContext(stopCtx, "docker", "logs", id).CombinedOutput()
 		if t.Failed() {

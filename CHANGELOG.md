@@ -8,6 +8,14 @@
 * Exclude local credentials and Git history from container build contexts.
 * Retry failed DNS deletion during reconciliation, keep one owner per hostname during adoption, and release idle UniFi connections on shutdown and initialization failure.
 * Validate hostnames and preserve records already occupying them. Adoption skips disabled, non-A, and ambiguous records.
+* Daemon: refuse to create or adopt records for names it depends on: the UniFi, Postgres and `DOCKER_HOST` hosts, `localhost`, and Docker's host aliases.
+* Exit non-zero and log `docker event stream error` whenever the Docker event stream ends while the daemon is running, including when the error lost a race with the closed event channel.
+* Warn at startup when UniFi TLS verification is disabled, and report `unifi_tls_verify` correctly when `UNIFI_CA_CERT` is set.
+* Defer orphan cleanup and stopped-container deletes by one tick when the UniFi or container list is unexpectedly empty, and bound UniFi pagination (100,000 records, 60 s per listing).
+* Roll back an unowned UniFi record on a context that survives shutdown, and log a failed rollback.
+* Plugin: make concurrent `Stop` calls clean up once, and track a record whose create committed but reported an error so `Stop` deletes it.
+* Daemon: when a create fails ambiguously (timeout, lost response, 5xx), claim the single matching UniFi record so it is owned and deleted on stop. A 4xx never triggers a claim; the plugin follows the same rule, so a replica that loses a 409 race no longer deletes the winner's record on `Stop`.
+* Plugin: refuse to create records for the UniFi host, the Traefik API host, `localhost` and Docker's host aliases, matching the daemon.
 * Reject UniFi list responses without a record list, treat HTTP 202 deletes as unfinished, and never adopt a policy whose wire type is literally `A`.
 * Retry transient UniFi startup failures and probe health on host-qualified metrics addresses.
 * Serialize Traefik plugin writes within a shared runtime. Separate plugin aliases and replicas still need one configured writer per site/domain scope.

@@ -38,7 +38,7 @@ Site selector. Matched against the controller's site **name**, **ID**, or **inte
 
 ### `UNIFI_SKIP_TLS_VERIFY`
 
-Default **`true`**: TLS certificate errors from the controller are ignored. That default exists so self-signed controllers work out of the box, but it lets anyone on the path impersonate the controller and read the API key. Set `false` for anything beyond a trusted home LAN, and use `UNIFI_CA_CERT` for a private CA.
+Default **`true`**: TLS certificate errors from the controller are ignored. That default exists so self-signed controllers work out of the box, but it lets anyone on the path impersonate the controller and read the API key. bollard logs a startup warning while this is in effect without `UNIFI_CA_CERT`. Set `false` for anything beyond a trusted home LAN, and use `UNIFI_CA_CERT` for a private CA.
 
 ```bash
 UNIFI_SKIP_TLS_VERIFY=false                 # verify with the system trust store
@@ -103,7 +103,7 @@ A container with an invalid label is **skipped** with a warning (`invalid labels
 
 ### `dns.bollard/hostname`
 
-Hostname to register, such as `myapp.home.arpa`. A missing or empty label means the container is not managed. Names are folded to lowercase and one trailing dot is removed. Use ASCII letters, digits, and interior hyphens, with at most 63 bytes per label and 253 bytes total. IP literals are not hostnames. A name already present in the store or UniFi blocks creation.
+Hostname to register, such as `myapp.home.arpa`. A missing or empty label means the container is not managed. Names are folded to lowercase and one trailing dot is removed. Use ASCII letters, digits, and interior hyphens, with at most 63 bytes per label and 253 bytes total. IP literals are not hostnames. A name already present in the store or UniFi blocks creation. The daemon also refuses reserved names, whether or not a record exists. They are derived once at startup from `UNIFI_HOST`, `DATABASE_URL` and `DOCKER_HOST`, plus a fixed list of Docker host aliases and `localhost`. Matching is exact, not zone-wide. See [SECURITY.md](../SECURITY.md#defaults-to-review).
 
 ### `dns.bollard/record-type`
 
