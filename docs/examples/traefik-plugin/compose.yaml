@@ -17,7 +17,7 @@ services:
       TRAEFIK_ADDRESS: ${TRAEFIK_ADDRESS:?set TRAEFIK_ADDRESS in .env}
       APP_HOST: ${APP_HOST:-app.home.arpa}
       POLL_INTERVAL: ${POLL_INTERVAL:-30s}
-      BOLLARD_VERSION: ${BOLLARD_VERSION:-v0.7.0}
+      BOLLARD_VERSION: ${BOLLARD_VERSION:-v0.7.2} # x-release-please-version
       PLUGIN_SOURCE: remote
     volumes:
       - ./templates:/templates:ro

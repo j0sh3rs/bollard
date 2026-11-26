@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -619,6 +620,63 @@ func TestListRecords_Pagination(t *testing.T) {
 				t.Fatalf("expected both records, got %+v, %v", records, err)
 			}
 		})
+	}
+}
+
+func TestListRecords_RecordCapStopsRunawayPagination(t *testing.T) {
+	page := `{"data":[` + strings.Repeat(`{"id":"x","type":"A_RECORD","enabled":true},`, 999) +
+		`{"id":"x","type":"A_RECORD","enabled":true}],"totalCount":1000000000}`
+	var listCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/proxy/network/integration/v1/sites" {
+			fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}]}`)
+			return
+		}
+		listCalls.Add(1)
+		fmt.Fprint(w, page)
+	}))
+	defer srv.Close()
+	p, err := unifi.New(context.Background(), newTestConfig(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.ListRecords(context.Background()); err == nil {
+		t.Fatal("expected an error once the record cap is exceeded")
+	}
+	if n := listCalls.Load(); n > 200 {
+		t.Fatalf("pagination ran %d requests; cap did not stop it", n)
+	}
+}
+
+// Only a 4xx answer proves the controller refused a write; 5xx and transport failures are ambiguous.
+func TestIsRejection(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{{http.StatusConflict, true}, {http.StatusBadRequest, true}, {http.StatusInternalServerError, false}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/proxy/network/integration/v1/sites" {
+				fmt.Fprint(w, `{"data":[{"id":"site","name":"default"}]}`)
+				return
+			}
+			w.WriteHeader(tc.status)
+			fmt.Fprint(w, `{"message":"no"}`)
+		}))
+		cfg := newTestConfig(srv.URL)
+		cfg.RetryAttempts = 1
+		p, err := unifi.New(context.Background(), cfg)
+		if err != nil {
+			srv.Close()
+			t.Fatal(err)
+		}
+		_, err = p.CreateRecord(context.Background(), unifi.DNSRecord{Hostname: "a.home.arpa", IP: "192.0.2.1", RecordType: "A"})
+		srv.Close()
+		if got := unifi.IsRejection(err); got != tc.want {
+			t.Errorf("status %d: IsRejection = %v, want %v (err %v)", tc.status, got, tc.want, err)
+		}
+	}
+	if unifi.IsRejection(errors.New("connection reset")) {
+		t.Error("transport error reported as a rejection")
 	}
 }
 

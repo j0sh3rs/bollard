@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -61,6 +62,22 @@ func newHTTPTransport(cfg *Config) (*httpTransport, error) {
 // UniFi controller. Safe to call more than once.
 func (t *httpTransport) CloseIdleConnections() {
 	t.client.CloseIdleConnections()
+}
+
+// HTTPError is a response the controller sent with a status of 300 or more.
+type HTTPError struct {
+	Status int
+	Err    error
+}
+
+func (e *HTTPError) Error() string { return e.Err.Error() }
+func (e *HTTPError) Unwrap() error { return e.Err }
+
+// IsRejection reports whether err is a 4xx answer: the controller received the request and refused
+// it, so the operation did not commit. Transport errors, timeouts and 5xx are ambiguous and return false.
+func IsRejection(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status >= 400 && he.Status < 500
 }
 
 func (t *httpTransport) do(ctx context.Context, method, url string, body []byte) ([]byte, int, error) {
@@ -127,13 +144,13 @@ func (t *httpTransport) doOnce(ctx context.Context, method, url string, body []b
 	if resp.StatusCode >= 300 {
 		var apiErr apiErrorResponse
 		if jsonErr := json.Unmarshal(data, &apiErr); jsonErr == nil && apiErr.Message != "" {
-			return nil, resp.StatusCode, &apiErr
+			return nil, resp.StatusCode, &HTTPError{Status: resp.StatusCode, Err: &apiErr}
 		}
 		limit := 512
 		if len(data) < limit {
 			limit = len(data)
 		}
-		return nil, resp.StatusCode, fmt.Errorf("unifi: HTTP %d: %s", resp.StatusCode, strconv.Quote(string(data[:limit])))
+		return nil, resp.StatusCode, &HTTPError{Status: resp.StatusCode, Err: fmt.Errorf("unifi: HTTP %d: %s", resp.StatusCode, strconv.Quote(string(data[:limit])))}
 	}
 	return data, resp.StatusCode, nil
 }

@@ -56,7 +56,7 @@ Gauge. Records in the store, refreshed at the end of each reconcile tick. It rea
 
 #### `bollard_record_hostname_conflicts_total`
 
-Counter. A hostname conflict detected during record creation or adoption. Existing names in the store or UniFi block creation.
+Counter. A hostname conflict detected during record creation or adoption. Existing names in the store or UniFi block creation, and so do the daemon's reserved names (see [SECURITY.md](../SECURITY.md#defaults-to-review)). A reserved-name refusal on a start event also logs `handle event failed`, so you can alert or grep on either.
 
 ```promql
 increase(bollard_record_hostname_conflicts_total[1h])

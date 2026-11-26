@@ -130,7 +130,7 @@ Bollard issues no certificates and does not require TLS on the router. TLS setti
 1. Configure a dedicated Traefik instance with one replica as the DNS writer. It must see all routes for the UniFi site and domain scope it manages.
 2. Enable the Bollard provider and mount its UniFi key only on the writer. Keep the ordinary routing providers enabled on the serving replicas, but omit Bollard from their `providers.plugin` configuration. Do not run another DNS writer for the same names.
 3. Set `address` to the stable IPv4 address clients use to reach Traefik, such as a load balancer. Do not use the writer's instance address unless clients should route there.
-4. When replacing or upgrading the writer, stop the old process and confirm it has exited before starting the new one. Use a stop-before-start strategy, not a rolling update that can run both writers at once. The other replicas keep serving traffic, and stopping the writer leaves existing DNS records in place.
+4. When replacing or upgrading the writer, stop the old process and confirm it has exited before starting the new one. In releases with shutdown cleanup (after v0.7.2), stopping deletes the records the old writer created and the new writer re-creates them on its first poll; older releases leave them. Use a stop-before-start strategy, not a rolling update that can run both writers at once. The other replicas keep serving traffic.
 
 Use only one registered Bollard writer per site/domain scope. The plugin's [coordination](explanation.md#what-concurrent-means-here) does not extend across plugin aliases or across processes.
 

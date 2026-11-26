@@ -9,7 +9,7 @@ Not sure this is the right mode? bollard has two:
 | Use when | You label plain Docker containers | You already run Traefik and want DNS from router `Host()` rules |
 | Needs Docker socket | yes, read-only | no |
 | Keeps state | yes (SQLite/Postgres) | no |
-| Deletes DNS records | yes, ones it owns | never |
+| Deletes DNS records | yes, ones it owns | only ones it created, at shutdown |
 
 ## Prerequisites
 

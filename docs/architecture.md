@@ -8,7 +8,7 @@ This page explains how the **standalone Docker daemon** works and why it is buil
 | Discovers hosts from | Docker events + `dns.bollard/*` labels | Traefik router `Host()` rules |
 | Needs Docker socket | yes (read-only) | no |
 | State | SQLite or Postgres ownership store | none |
-| Deletes records | yes, records it owns | never |
+| Deletes records | yes, records it owns | only records it created, at shutdown |
 
 ## Component diagram
 
@@ -134,4 +134,4 @@ It does not inspect the container's own networks. Restart bollard if the host IP
 
 ## Not stateless
 
-The daemon is deliberately stateful and delete-capable. The plugin makes the opposite trade: no store, create-only. Pick by what you operate, not by feature count; the plugin docs explain the plugin's guarantees.
+The daemon is deliberately stateful and delete-capable. The plugin makes the opposite trade: no store; it creates records and, at shutdown only, deletes the ones it created. Pick by what you operate, not by feature count; the plugin docs explain the plugin's guarantees.

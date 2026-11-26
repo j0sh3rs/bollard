@@ -17,6 +17,9 @@ import (
 	"github.com/j0sh3rs/bollard/internal/unifi"
 )
 
+// rollbackTimeout bounds the compensating delete after a failed ownership write.
+const rollbackTimeout = 5 * time.Second
+
 // ContainerLister returns a snapshot of running containers with their labels.
 type ContainerLister interface {
 	ListRunning(ctx context.Context) (map[string]map[string]string, error)
@@ -24,20 +27,36 @@ type ContainerLister interface {
 
 // Reconciler orchestrates DNS record lifecycle.
 type Reconciler struct {
-	store       store.Store
-	provider    unifi.DNSProvider
-	lister      ContainerLister
-	hostIP      string
-	resolveOnce sync.Once
-	resolveErr  error
-	metrics     *metrics.Metrics
-	log         *slog.Logger
+	store             store.Store
+	provider          unifi.DNSProvider
+	lister            ContainerLister
+	hostIP            string
+	resolveOnce       sync.Once
+	resolveErr        error
+	metrics           *metrics.Metrics
+	reserved          map[string]struct{}
+	emptyUnifiTicks   int // consecutive ticks with a suspicious empty UniFi list
+	emptyRunningTicks int // consecutive ticks with a suspicious empty container list
+	log               *slog.Logger
 }
 
 // New creates a Reconciler. hostIP may be empty (inferred on first use).
 // m may be nil; all metric calls are no-ops when nil.
 func New(s store.Store, p unifi.DNSProvider, lister ContainerLister, hostIP string, m *metrics.Metrics, log *slog.Logger) *Reconciler {
 	return &Reconciler{store: s, provider: p, lister: lister, hostIP: hostIP, metrics: m, log: log}
+}
+
+// WithReservedHostnames makes the reconciler refuse to create records for the given names.
+// Use it for names bollard itself resolves (the UniFi controller host), so a label author
+// cannot redirect the daemon's own API traffic with a vacant name.
+func (r *Reconciler) WithReservedHostnames(names ...string) *Reconciler {
+	r.reserved = make(map[string]struct{}, len(names))
+	for _, n := range names {
+		if n = dnsname.Canonical(n); n != "" {
+			r.reserved[n] = struct{}{}
+		}
+	}
+	return r
 }
 
 func (r *Reconciler) resolvedIP(override string) (string, error) {
@@ -151,6 +170,10 @@ func (r *Reconciler) handleStart(ctx context.Context, e docker.Event) error {
 }
 
 func (r *Reconciler) createRecord(ctx context.Context, e docker.Event, spec *docker.RecordSpec, names occupiedNames) error {
+	if _, ok := r.reserved[spec.Hostname]; ok {
+		r.countHostnameConflict()
+		return fmt.Errorf("reconciler: hostname %q is reserved (UniFi controller host), refusing to create it for %s", spec.Hostname, e.Ref())
+	}
 	ip, err := r.resolvedIP(spec.IPOverride)
 	if err != nil {
 		if r.metrics != nil {
@@ -167,16 +190,31 @@ func (r *Reconciler) createRecord(ctx context.Context, e docker.Event, spec *doc
 		Hostname: spec.Hostname, IP: ip, RecordType: spec.RecordType, TTL: spec.TTL,
 	})
 	if err != nil {
-		if r.metrics != nil {
-			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
+		// An ambiguous failure (timeout, lost response, no ID) may have committed the record. Claim it
+		// only when exactly one record matches name, type and address; a 4xx means it did not commit.
+		if !unifi.IsRejection(err) {
+			unifiID = r.findCommitted(ctx, spec, ip)
 		}
-		return fmt.Errorf("reconciler: create record %s for %s: %w", spec.Hostname, e.Ref(), err)
+		if unifiID == "" {
+			if r.metrics != nil {
+				r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
+			}
+			return fmt.Errorf("reconciler: create record %s for %s: %w", spec.Hostname, e.Ref(), err)
+		}
+		r.log.Warn("recovered UniFi record after a failed create", "hostname", spec.Hostname, "unifi_id", unifiID, "err", err)
 	}
 
 	if err := r.saveOwnership(ctx, e.ContainerID, spec, ip, unifiID); err != nil {
-		if r.provider.DeleteRecord(ctx, unifiID) == nil {
+		// Roll back on a context that survives shutdown cancellation: the cancelled ctx is the likely
+		// reason the store write failed, and it would fail the delete too and orphan the UniFi record.
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		if rbErr := r.provider.DeleteRecord(rbCtx, unifiID); rbErr == nil {
 			delete(names, spec.Hostname)
+		} else {
+			r.log.Error("rollback delete of unowned UniFi record failed; remove it manually",
+				"hostname", spec.Hostname, "unifi_id", unifiID, "err", rbErr)
 		}
+		cancel()
 		if r.metrics != nil {
 			r.metrics.RecordsTotal.WithLabelValues("created", "false").Inc()
 		}
@@ -188,6 +226,41 @@ func (r *Reconciler) createRecord(ctx context.Context, e docker.Event, spec *doc
 	}
 	r.log.Info("created DNS record", "hostname", spec.Hostname, "ip", ip, "container", e.Ref())
 	return nil
+}
+
+// findCommitted returns the ID of the only A-type record at spec.Hostname with the given address, or ""
+// when there is none, several, or the lookup fails. Callers have just checked the name was free, so a
+// match is the record a failed create committed.
+func (r *Reconciler) findCommitted(ctx context.Context, spec *docker.RecordSpec, ip string) string {
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	records, err := r.provider.ListRecords(lookupCtx)
+	if err != nil {
+		r.log.Warn("could not look for a record committed by a failed create", "hostname", spec.Hostname, "err", err)
+		return ""
+	}
+	owned := map[string]struct{}{}
+	if rows, err := r.store.ListAll(ctx); err == nil {
+		for _, row := range rows {
+			owned[row.UnifiRecordID] = struct{}{}
+		}
+	} else {
+		r.log.Warn("could not check ownership of a record committed by a failed create", "hostname", spec.Hostname, "err", err)
+		return ""
+	}
+	id, n := "", 0
+	for _, rec := range records {
+		if _, taken := owned[rec.ID]; taken {
+			continue // another row already owns it; it is not ours to claim
+		}
+		if dnsname.Canonical(rec.Hostname) == spec.Hostname && rec.IP == ip && rec.RecordType == spec.RecordType && rec.ID != "" {
+			id, n = rec.ID, n+1
+		}
+	}
+	if n != 1 {
+		return ""
+	}
+	return id
 }
 
 func (r *Reconciler) saveOwnership(ctx context.Context, containerID string, spec *docker.RecordSpec, ip, unifiID string) error {
@@ -280,6 +353,22 @@ func (r *Reconciler) recordSharedWithRunning(ctx context.Context, rec *store.Rec
 	return false, nil
 }
 
+// confirmEmpty guards destructive passes against a bad-but-successful list response. A suspicious
+// empty list (empty while the store has rows) is ignored the first time it is seen and acted on
+// when it repeats on the next tick, so a transient empty or truncated answer cannot wipe state.
+func (r *Reconciler) confirmEmpty(ticks *int, suspicious bool, msg string) bool {
+	if !suspicious {
+		*ticks = 0
+		return true
+	}
+	*ticks++
+	if *ticks >= 2 {
+		return true
+	}
+	r.log.Warn(msg)
+	return false
+}
+
 // Reconcile performs one full reconcile tick. It performs three passes:
 //  1. Orphan cleanup: store rows whose UniFi record has been deleted externally
 //     are removed from the store.
@@ -305,11 +394,13 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	for i := range unifiRecords {
 		unifiIndex[unifiRecords[i].ID] = &unifiRecords[i]
 	}
+	allowOrphanCleanup := r.confirmEmpty(&r.emptyUnifiTicks, len(unifiRecords) == 0 && len(storeRecords) > 0,
+		"reconcile: UniFi list is empty but store has rows; deferring orphan cleanup one tick")
 	ownedNames := make(map[string]int, len(storeRecords))
 	storeIndex := make(map[string]struct{}, len(storeRecords))
 	for _, sr := range storeRecords {
 		storeIndex[sr.ContainerID] = struct{}{}
-		if _, exists := unifiIndex[sr.UnifiRecordID]; !exists {
+		if _, exists := unifiIndex[sr.UnifiRecordID]; !exists && allowOrphanCleanup {
 			r.log.Warn("orphaned store record, cleaning up",
 				"hostname", sr.Hostname, "unifi_id", sr.UnifiRecordID)
 			if err := r.store.Delete(ctx, sr.ID); err == nil {
@@ -335,6 +426,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		r.log.Warn("reconcile: list running containers failed", "err", err)
 		return nil // best-effort; don't fail the full tick
 	}
+	allowDeletes := r.confirmEmpty(&r.emptyRunningTicks, len(running) == 0 && len(storeRecords) > 0,
+		"reconcile: container list is empty but store has rows; deferring deletes one tick")
 	// Records still referenced by a running row are never deleted, even
 	// when the stopped row is a duplicate of it.
 	runningUnifiIDs := map[string]struct{}{}
@@ -344,6 +437,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 	}
 	for _, sr := range storeRecords {
+		if !allowDeletes {
+			break
+		}
 		if _, ok := running[sr.ContainerID]; ok {
 			continue
 		}
@@ -383,6 +479,11 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		}
 		spec, err := docker.ParseLabels(labels)
 		if err != nil || spec == nil || !spec.Enabled {
+			continue
+		}
+		if _, ok := r.reserved[spec.Hostname]; ok {
+			r.countHostnameConflict()
+			r.log.Warn("reconcile: hostname is reserved, not creating", "hostname", spec.Hostname, "container", containerID)
 			continue
 		}
 		if ownedNames[spec.Hostname] > 0 || names[spec.Hostname].count > 0 {
@@ -427,6 +528,11 @@ func (r *Reconciler) Adopt(ctx context.Context, running map[string]map[string]st
 		}
 		spec, err := docker.ParseLabels(labels)
 		if err != nil || spec == nil || !spec.Enabled {
+			continue
+		}
+		if _, ok := r.reserved[spec.Hostname]; ok {
+			r.countHostnameConflict()
+			r.log.Warn("adopt: hostname is reserved, skipping", "hostname", spec.Hostname, "container", containerID)
 			continue
 		}
 		if ownedNames[spec.Hostname] {

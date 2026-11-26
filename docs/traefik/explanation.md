@@ -6,15 +6,16 @@ A Traefik provider normally supplies routing configuration. This one supplies no
 
 That design explains most of its limits. It sees only what Traefik's API reports (names, not traffic), and it runs inside Traefik (so it has no database, no Docker socket, and no lifecycle events).
 
-## Why it never updates or deletes
+## Why it never updates, and deletes only its own records
 
-The standalone controller can delete safely because it keeps a state database that records which UniFi record belongs to which container. The plugin keeps nothing. Without a record of what it created, it cannot tell its own records from ones you made by hand, from another tool's, or from another Traefik's. Deleting on router removal would risk removing a record someone else relies on; "updating" a record to the current `address` would silently overwrite a deliberate manual choice.
+The standalone controller keeps a state database that records which UniFi record belongs to which container. The plugin keeps none across restarts. It cannot tell records you made by hand, another tool made, or another Traefik made from its own, and it cannot recognize records from an earlier run. So it never updates a record: "updating" to the current `address` could silently overwrite a deliberate manual choice. It never deletes on router removal either, because a record could be relied on by someone else.
 
-So the rule is simple: an existing name is never touched. Consequences operators feel:
+The one exception is shutdown, in releases after `v0.7.2` (earlier ones leave all records). While running, the plugin remembers the UniFi ID of every record it created. When Traefik stops the plugin, it deletes exactly those records without re-checking them, so a record you edited after creation is deleted too, and they do not outlive the traffic they point at. A failed delete is logged and does not stop the rest. Consequences operators feel:
 
-- Removing a route, stopping Traefik, or changing `address` leaves DNS alone. Stale records are cleaned up by you.
+- Removing a route or changing `address` leaves DNS alone. Stale records are cleaned up by you.
+- Records from a previous run, a crashed Traefik, or another writer are never deleted. After a crash (no shutdown), the records it created stay until you remove them.
 - A record pointing at the wrong IP stays wrong until you fix it. The plugin logs a conflict each poll to remind you.
-- A restart never deletes records. Use a [stop-before-start rollout](how-to.md#run-one-dns-writer-with-multiple-replicas) when replacing the writer.
+- A restart or reload deletes what the stopped instance created, and the new instance re-creates the records on its first poll. Use a [stop-before-start rollout](how-to.md#run-one-dns-writer-with-multiple-replicas) when replacing the writer.
 
 ## Why every named record reserves the name
 
@@ -27,7 +28,7 @@ Each provider polls sequentially. Provider instances sharing one loaded plugin r
 Traefik loads separately registered plugin aliases in separate interpreters. They do not share the guard, even in one process. Different controller hostnames, separate Traefik processes, and other tools also bypass it. Two writers outside the guard can see the same name as free and both try to create it. What happens next depends on UniFi:
 
 - If UniFi rejects the duplicate (for example with a 409), one record wins and the loser logs a failed create. The plugin never overwrites or retries blindly.
-- If UniFi accepts duplicates, both records exist, and the plugin will not delete either.
+- If UniFi accepts duplicates, both records exist. The plugin deletes only the one it created, and only at shutdown.
 
 Both outcomes are covered by tests with a simulated remote writer. Matching target IPs do not prevent duplicates.
 

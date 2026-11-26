@@ -36,3 +36,13 @@ func Valid(canonical string) bool {
 		canonical = rest
 	}
 }
+
+// HostAliases are names Docker Engine, Docker Desktop (current and legacy) and Podman resolve for
+// containers to reach the host or the Docker VM, plus localhost. No label may claim them.
+var HostAliases = []string{
+	"host.docker.internal", "gateway.docker.internal", "kubernetes.docker.internal", "vm.docker.internal",
+	"docker.internal", "host.containers.internal",
+	"docker.for.mac.host.internal", "docker.for.mac.localhost", "docker.for.mac.http.internal",
+	"docker.for.win.host.internal", "docker.for.win.localhost", "docker.for.win.http.internal",
+	"localhost",
+}

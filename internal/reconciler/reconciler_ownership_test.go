@@ -139,28 +139,77 @@ func TestReconcile_DeletionFreesOnlyTheDeletedPolicy(t *testing.T) {
 }
 
 func TestReconcile_KeepsNameOccupiedWhenCreatedRecordMayRemain(t *testing.T) {
-	for _, tc := range []string{"lost create response", "failed rollback"} {
-		t.Run(tc, func(t *testing.T) {
-			s, p := newFakeStore(), newFakeProvider()
-			if tc == "lost create response" {
-				p.createResponseErr = fmt.Errorf("create response lost")
-			} else {
-				s.createErr = fmt.Errorf("store write failed")
-				p.deleteErr = fmt.Errorf("rollback failed")
-			}
-			lister := &fakeLister{containers: map[string]map[string]string{
-				"first":  {"dns.bollard/hostname": "web.home.arpa"},
-				"second": {"dns.bollard/hostname": "web.home.arpa"},
-			}}
-			r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
-			if err := r.Reconcile(context.Background()); err != nil {
-				t.Fatalf("Reconcile: %v", err)
-			}
-			if p.listCalls != 1 || p.nextID != 1 || len(p.records) != 1 || len(s.records) != 0 {
-				t.Fatalf("lost occupancy: lists=%d, creates=%d, store=%+v, DNS=%+v",
-					p.listCalls, p.nextID, s.records, p.records)
-			}
-		})
+	s, p := newFakeStore(), newFakeProvider()
+	s.createErr = fmt.Errorf("store write failed")
+	p.deleteErr = fmt.Errorf("rollback failed")
+	lister := &fakeLister{containers: map[string]map[string]string{
+		"first":  {"dns.bollard/hostname": "web.home.arpa"},
+		"second": {"dns.bollard/hostname": "web.home.arpa"},
+	}}
+	r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if p.listCalls != 1 || p.nextID != 1 || len(p.records) != 1 || len(s.records) != 0 {
+		t.Fatalf("lost occupancy: lists=%d, creates=%d, store=%+v, DNS=%+v",
+			p.listCalls, p.nextID, s.records, p.records)
+	}
+}
+
+// A create whose response was lost may have committed. The daemon claims the single matching record so
+// it is owned (and deleted on stop) instead of leaking, and still creates nothing for the second claimant.
+func TestReconcile_ClaimsRecordCommittedByLostCreateResponse(t *testing.T) {
+	s, p := newFakeStore(), newFakeProvider()
+	p.createResponseErr = fmt.Errorf("create response lost")
+	lister := &fakeLister{containers: map[string]map[string]string{
+		"first":  {"dns.bollard/hostname": "web.home.arpa"},
+		"second": {"dns.bollard/hostname": "web.home.arpa"},
+	}}
+	r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if p.nextID != 1 || len(p.records) != 1 || len(s.records) != 1 {
+		t.Fatalf("creates=%d, store=%+v, DNS=%+v", p.nextID, s.records, p.records)
+	}
+	for _, row := range s.records {
+		if row.UnifiRecordID != "unifi-1" {
+			t.Fatalf("row %+v does not own the committed record", row)
+		}
+	}
+}
+
+// A 4xx means the controller refused the create, so a matching record is someone else's and must stay unclaimed.
+func TestReconcile_DoesNotClaimRecordAfterRejectedCreate(t *testing.T) {
+	s, p := newFakeStore(), newFakeProvider()
+	p.createResponseErr = &unifi.HTTPError{Status: 409, Err: fmt.Errorf("duplicate")}
+	lister := &fakeLister{containers: map[string]map[string]string{
+		"first": {"dns.bollard/hostname": "web.home.arpa"},
+	}}
+	r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(s.records) != 0 {
+		t.Fatalf("claimed a record after a 409: %+v", s.records)
+	}
+}
+
+// A matching record that another store row already owns must never be claimed after a failed create.
+func TestReconcile_DoesNotClaimRecordOwnedByAnotherRow(t *testing.T) {
+	s, p := newFakeStore(), newFakeProvider()
+	p.createResponseErr = fmt.Errorf("create response lost")
+	// The fake provider stores the new record as unifi-1; make another row own that ID.
+	s.records["other"] = store.Record{ID: "o", ContainerID: "other", Hostname: "elsewhere.home.arpa", UnifiRecordID: "unifi-1"}
+	lister := &fakeLister{containers: map[string]map[string]string{
+		"first": {"dns.bollard/hostname": "web.home.arpa"},
+	}}
+	r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, claimed := s.records["first"]; claimed {
+		t.Fatalf("claimed a record owned by another row: %+v", s.records)
 	}
 }
 

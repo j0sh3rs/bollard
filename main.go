@@ -20,12 +20,14 @@ import (
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/j0sh3rs/bollard/internal/config"
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 	dockerwatcher "github.com/j0sh3rs/bollard/internal/docker"
 	bollardlog "github.com/j0sh3rs/bollard/internal/log"
 	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/reconciler"
 	"github.com/j0sh3rs/bollard/internal/store"
 	"github.com/j0sh3rs/bollard/internal/unifi"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -181,7 +183,8 @@ func run(adopt bool) int {
 	defer listerClient.Close()
 
 	lister := &dockerLister{client: listerClient}
-	rec := reconciler.New(db, provider, lister, "", m, logger)
+	rec := reconciler.New(db, provider, lister, "", m, logger).
+		WithReservedHostnames(reservedHostnames(cfg.UnifiHost, cfg.DatabaseURL, os.Getenv("DOCKER_HOST"))...)
 
 	if adopt {
 		logger.Info("starting adopt phase")
@@ -216,13 +219,16 @@ func run(adopt bool) int {
 	logger.Info("configuration",
 		"unifi_host", cfg.UnifiHost,
 		"unifi_site", cfg.UnifiSite,
-		"unifi_tls_verify", !cfg.UnifiSkipTLSVerify,
+		"unifi_tls_verify", cfg.UnifiCACert != "" || !cfg.UnifiSkipTLSVerify,
 		"database", sanitizeDSN(cfg.DatabaseURL),
 		"reconcile_interval", cfg.ReconcileInterval,
 		"metrics_addr", cfg.MetricsAddr,
 		"log_format", cfg.LogFormat,
 		"log_level", cfg.LogLevel,
 	)
+	if cfg.UnifiCACert == "" && cfg.UnifiSkipTLSVerify {
+		logger.Warn("UniFi TLS certificate verification is disabled; the API key can be captured by anyone who can impersonate the controller. Set UNIFI_SKIP_TLS_VERIFY=false or UNIFI_CA_CERT")
+	}
 
 	// State store synopsis.
 	if existing, err := db.ListAll(context.Background()); err == nil {
@@ -237,14 +243,12 @@ func run(adopt bool) int {
 			logger.Info("shutting down")
 			return 0
 		case err := <-errCh:
-			if dockerStreamStopped(ctx, err) {
-				return 0
-			}
-			logger.Error("docker event stream error", "err", err)
-			return 1
+			return streamExit(ctx, err, logger)
 		case e, ok := <-eventCh:
 			if !ok {
-				return 0
+				// Watch closes errCh before eventCh, so a stream error is already buffered. A
+				// ready closed eventCh can win the select against it; read the error here.
+				return streamExit(ctx, pendingStreamErr(errCh), logger)
 			}
 			m.DockerEventsTotal.WithLabelValues(e.Type).Inc()
 			if err := rec.HandleEvent(ctx, e); err != nil {
@@ -291,10 +295,34 @@ func retryableUniFiStartup(err error) bool {
 		errors.Is(err, syscall.ECONNRESET)
 }
 
-// dockerStreamStopped reports a clean end of the Docker event stream: no error, or the
-// cancellation caused by our own shutdown signal racing the select in run.
+// dockerStreamStopped reports a clean end of the Docker event stream: our own shutdown signal
+// cancelled it, either as no error or as context.Canceled. Anything else, including a stream
+// that ends with no error while we are still running, is a failure.
 func dockerStreamStopped(ctx context.Context, err error) bool {
-	return err == nil || (ctx.Err() != nil && errors.Is(err, context.Canceled))
+	return ctx.Err() != nil && (err == nil || errors.Is(err, context.Canceled))
+}
+
+// streamExit returns the process exit code after the Docker event stream ended with err
+// (nil when only the channels closed), logging any failure.
+func streamExit(ctx context.Context, err error, logger *slog.Logger) int {
+	if dockerStreamStopped(ctx, err) {
+		return 0
+	}
+	if err == nil {
+		err = errors.New("event stream closed unexpectedly")
+	}
+	logger.Error("docker event stream error", "err", err)
+	return 1
+}
+
+// pendingStreamErr returns an error already buffered on errCh without blocking, or nil.
+func pendingStreamErr(errCh <-chan error) error {
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
 }
 
 type dockerLister struct {
@@ -361,4 +389,56 @@ func isDSNSecretKey(raw string) bool {
 		key = decoded
 	}
 	return key == "password" || key == "sslpassword"
+}
+
+// controllerHostname returns the host part of UNIFI_HOST (scheme optional), or "" if it is not parseable.
+// IP literals are returned as-is; they are never valid DNS hostnames, so the reserved-name guard ignores them.
+func controllerHostname(raw string) string {
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// reservedHostnames lists names the daemon (or its containers) resolve for control-plane traffic:
+// the UniFi controller, Postgres hosts in DATABASE_URL, a TCP DOCKER_HOST, and Docker's well-known
+// host aliases. Label authors must not be able to create or adopt records for them.
+func reservedHostnames(unifiHost, databaseURL, dockerHost string) []string {
+	names := append([]string{controllerHostname(unifiHost)}, dnsname.HostAliases...)
+	names = append(names, postgresHostnames(databaseURL)...)
+	if u, err := url.Parse(dockerHost); err == nil && dockerHost != "" {
+		names = append(names, u.Hostname())
+	}
+	return names
+}
+
+// postgresHostnames returns every host pgx will actually dial for a postgres:// DSN: the primary
+// and all fallbacks, after pgx's own handling of multi-host lists and the "host" query override.
+// Unix socket paths are skipped. Keyword/value DSNs are handled by SQLite in store.NewStore,
+// so they yield nothing.
+func postgresHostnames(dsn string) []string {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return nil
+	}
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return nil // the store fails to open the same DSN, so the daemon never starts
+	}
+	hosts := []string{cfg.Host}
+	for _, fb := range cfg.Fallbacks {
+		hosts = append(hosts, fb.Host)
+	}
+	var out []string
+	seen := map[string]bool{} // pgx repeats each host per TLS fallback
+	for _, h := range hosts {
+		if h != "" && !strings.HasPrefix(h, "/") && !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
 }

@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 	"github.com/j0sh3rs/bollard/internal/unifi"
 )
 
@@ -22,6 +24,41 @@ import (
 // package has no syntax errors — no Docker socket required.
 func TestMainPackageCompiles(t *testing.T) {
 	t.Log("main package compiled successfully")
+}
+
+func TestReservedHostnames(t *testing.T) {
+	got := reservedHostnames(
+		"https://unifi.home.arpa:443",
+		"postgres://u:p%40ss@db1.home.arpa:5432,db3.home.arpa:5433/bollard",
+		"tcp://dockerd.home.arpa:2376",
+	)
+	for _, n := range []string{"unifi.home.arpa", "host.docker.internal", "gateway.docker.internal", "host.containers.internal", "localhost",
+		"db1.home.arpa", "db3.home.arpa", "dockerd.home.arpa"} {
+		if !slices.Contains(got, n) {
+			t.Errorf("%q is not reserved; got %v", n, got)
+		}
+	}
+	if len(got) != 1+len(dnsname.HostAliases)+3 {
+		t.Errorf("unexpected reserved set: %v", got)
+	}
+}
+
+func TestPostgresHostnames(t *testing.T) {
+	cases := []struct {
+		name, dsn string
+		want      string
+	}{
+		{"multi-host", "postgres://u@h1.home.arpa:5432,h2.home.arpa:5433/db", "h1.home.arpa,h2.home.arpa"},
+		{"host query override with socket", "postgres://u@ignored.home.arpa/db?host=db2.home.arpa,/var/run/postgresql", "db2.home.arpa"},
+		{"postgresql scheme", "postgresql://u:p@h.home.arpa/db", "h.home.arpa"},
+		{"keyword DSN is SQLite", "host=db.home.arpa user=x", ""},
+		{"sqlite DSN", "file:bollard.db", ""},
+	}
+	for _, c := range cases {
+		if got := strings.Join(postgresHostnames(c.dsn), ","); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
 }
 
 func TestSanitizeDSN(t *testing.T) {
@@ -179,5 +216,47 @@ func TestShutdownSignalPrecedesDockerCancellation(t *testing.T) {
 	}
 	if dockerStreamStopped(context.Background(), context.Canceled) {
 		t.Fatal("unexpected Docker stream cancellation was hidden from the daemon")
+	}
+}
+
+func TestStreamExit(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cases := []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want int
+	}{
+		{"stream error while running", context.Background(), io.EOF, 1},
+		{"channels closed with no error while running", context.Background(), nil, 1},
+		{"shutdown, no error", cancelled, nil, 0},
+		{"shutdown, canceled error", cancelled, context.Canceled, 0},
+		{"shutdown racing a real error", cancelled, io.EOF, 1},
+	}
+	for _, c := range cases {
+		if got := streamExit(c.ctx, c.err, logger); got != c.want {
+			t.Errorf("%s: exit %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// Watch closes errCh before eventCh, so a ready closed eventCh can win the select. The buffered
+// error must still be read, or a failed stream would look like a clean exit.
+func TestPendingStreamErr(t *testing.T) {
+	buffered := make(chan error, 1)
+	buffered <- io.EOF
+	close(buffered)
+	if err := pendingStreamErr(buffered); !errors.Is(err, io.EOF) {
+		t.Fatalf("got %v, want the buffered error", err)
+	}
+	if err := pendingStreamErr(make(chan error)); err != nil {
+		t.Fatalf("empty open channel returned %v", err)
+	}
+	closed := make(chan error)
+	close(closed)
+	if err := pendingStreamErr(closed); err != nil {
+		t.Fatalf("empty closed channel returned %v", err)
 	}
 }

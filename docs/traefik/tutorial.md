@@ -1,6 +1,8 @@
 # Tutorial: register a Traefik route in UniFi DNS
 
-You will run Traefik 3.7.19, an nginx backend, and the Bollard plugin (release `v0.7.0`) with Docker Compose. Traefik routes `app.home.arpa` to nginx. Bollard notices that route and creates `app.home.arpa → <Traefik IP>` in UniFi DNS. You then prove routing and DNS separately.
+You will run Traefik 3.7.19, an nginx backend, and the Bollard plugin with Docker Compose. Traefik routes `app.home.arpa` to nginx. Bollard notices that route and creates `app.home.arpa → <Traefik IP>` in UniFi DNS. You then prove routing and DNS separately.
+
+The Compose project loads Bollard plugin release `v0.7.2`. <!-- x-release-please-version -->
 
 You know Docker and Traefik. You do not need to know Bollard or the UniFi API.
 
@@ -39,7 +41,7 @@ Edit `.env`:
 | Variable | Set it to |
 |---|---|
 | `UNIFI_HOST` | Your controller URL. It must be reachable from inside the Traefik container. |
-| `UNIFI_SITE` | `Default` for a stock controller. `v0.7.0` accepts only the site display name or UUID. |
+| `UNIFI_SITE` | `Default` for a stock controller. Releases before `v0.7.1` accept only the site display name or UUID. |
 | `TRAEFIK_ADDRESS` | The IPv4 address clients will use to reach Traefik. Not the nginx IP, not the controller. |
 | `APP_HOST` | `app.home.arpa`, or your chosen name. |
 
@@ -150,7 +152,7 @@ Run `docker compose up -d --force-recreate` after changing either `.env` or a te
 docker compose down -v
 ```
 
-This removes the containers and the rendered-config volume. **It does not delete the DNS record.** Bollard never deletes DNS, by design. Remove `app.home.arpa` in UniFi manually if you no longer want it, and leave any records you created by hand untouched.
+This removes the containers and the rendered-config volume. In releases after `v0.7.2`, stopping Traefik also stops the plugin, which deletes the DNS records it created, so `app.home.arpa` is removed from UniFi. With `v0.7.2` or earlier, remove it in UniFi yourself. Records you created by hand, or that earlier runs created, are left untouched.
 
 ## What you learned
 
@@ -158,4 +160,4 @@ This removes the containers and the rendered-config volume. **It does not delete
 - Only exact positive `Host()` names become records, all with TTL 300 and the single `address` you configured.
 - `curl --resolve` tests routing; `dig @controller` tests DNS. Use both.
 
-Next: [integrate file and Docker routes](how-to.md#discover-file-defined-routes), [serve HTTPS](how-to.md#serve-application-https), or read [why the plugin is create-only](explanation.md#why-it-never-updates-or-deletes).
+Next: [integrate file and Docker routes](how-to.md#discover-file-defined-routes), [serve HTTPS](how-to.md#serve-application-https), or read [why the plugin never updates and deletes only its own records](explanation.md#why-it-never-updates-and-deletes-only-its-own-records).

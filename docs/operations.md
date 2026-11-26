@@ -20,6 +20,11 @@ Log messages you should recognise (abridged):
 | `created DNS record` / `deleted DNS record` | Normal lifecycle |
 | `invalid labels on container` | Container skipped; fix labels |
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
+| `hostname ... is reserved` / `reconcile: hostname is reserved` / `adopt: hostname is reserved` | A label asked for a reserved name (daemon only); the record was not created or adopted. See [SECURITY.md](../SECURITY.md#defaults-to-review) |
+| `UniFi TLS certificate verification is disabled` | `UNIFI_SKIP_TLS_VERIFY=true` with no `UNIFI_CA_CERT`; the API key is exposed to anyone who can impersonate the controller |
+| `UniFi list is empty but store has rows` / `container list is empty but store has rows` | A suspicious empty list. Orphan cleanup or deletes are deferred one tick and run if the list is still empty on the next |
+| `rollback delete of unowned UniFi record failed` | A record was created but its ownership row could not be saved, and the cleanup delete failed. Delete the named record by hand |
+| `recovered UniFi record after a failed create` | A create reported an error but the record exists; it is now owned by the container |
 | `orphaned store record, cleaning up` | A store row pointed at a UniFi record that no longer exists; row removed |
 | `reconcile failed` | Store or UniFi listing failed this tick |
 | `failed to delete unifi record` | UniFi delete failed during a stop; the store row is kept and retried on the next reconcile tick |

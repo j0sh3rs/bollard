@@ -66,6 +66,8 @@ type Provider struct {
 	cancel         context.CancelFunc
 	done           chan struct{}
 	created        map[string]string // UniFi record ID -> hostname, for records this instance created
+	stopOnce       sync.Once
+	reserved       map[string]bool // names the plugin must never create: its own control-plane hosts
 }
 
 // New validates configuration. Network access starts only in Provide.
@@ -113,6 +115,7 @@ func New(ctx context.Context, config *Config, name string) (*Provider, error) {
 	return &Provider{
 		ctx: ctx, api: strings.TrimRight(api.String(), "/"), address: ip.To4().String(), interval: interval,
 		controllerHost: controllerHost(host.Hostname()),
+		reserved:       reservedNames(host.Hostname(), api.Hostname()),
 		unifiConfig: &unifi.Config{
 			Host: strings.TrimRight(host.String(), "/"), APIKey: key, Site: site,
 			CACertPath: config.UnifiCACert, SkipTLSVerify: config.UnifiSkipTLSVerify,
@@ -142,6 +145,19 @@ func controllerHost(host string) string {
 		return ip.String()
 	}
 	return host
+}
+
+// reservedNames lists names a router rule must not make the plugin create: the UniFi controller,
+// the Traefik API host, and the Docker host aliases, matching the daemon's guard.
+func reservedNames(hosts ...string) map[string]bool {
+	out := make(map[string]bool, len(hosts)+len(dnsname.HostAliases))
+	for _, h := range hosts {
+		out[controllerHost(h)] = true
+	}
+	for _, h := range dnsname.HostAliases {
+		out[h] = true
+	}
+	return out
 }
 
 // Init satisfies the Traefik provider contract; New already validates configuration.
@@ -191,7 +207,7 @@ func (p *Provider) Stop() error {
 		cancel()
 		<-done
 	}
-	p.cleanup()
+	p.stopOnce.Do(p.cleanup) // concurrent Stop calls wait here rather than racing on p.created
 	p.client.CloseIdleConnections()
 	if closer, ok := p.dns.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
@@ -280,6 +296,15 @@ func (p *Provider) reconcile(ctx context.Context) error {
 	if err != nil || len(hosts) == 0 {
 		return err
 	}
+	for host := range hosts {
+		if p.reserved[host] {
+			p.logger.Printf("hostname %s is reserved, not creating it", host)
+			delete(hosts, host)
+		}
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
 
 	// Different site names can resolve to the same site, so serialize by controller.
 	gate, err := lockController(ctx, p.controllerHost)
@@ -310,6 +335,7 @@ func (p *Provider) reconcile(ctx context.Context) error {
 		ordered = append(ordered, host)
 	}
 	sort.Strings(ordered)
+	recoveryOK := true
 	for _, host := range ordered {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -321,7 +347,18 @@ func (p *Provider) reconcile(ctx context.Context) error {
 		cancelCreate()
 		if err != nil {
 			p.logError("create DNS record for "+host, err)
-			continue
+			// The POST may have committed before the error (timeout, lost response, no ID returned).
+			// Look for it so Stop can still delete it. One failed lookup disables further lookups this tick.
+			if recoveryOK && !unifi.IsRejection(err) {
+				var lerr error
+				if id, lerr = p.findCreated(host); lerr != nil {
+					recoveryOK = false
+				}
+			}
+			if id == "" {
+				continue
+			}
+			p.logger.Printf("recovered A record %s after a failed create", host)
 		}
 		if p.created == nil {
 			p.created = make(map[string]string)
@@ -330,6 +367,32 @@ func (p *Provider) reconcile(ctx context.Context) error {
 		p.logger.Printf("created A record %s -> %s", host, p.address)
 	}
 	return nil
+}
+
+// findCreated returns the ID of the single A record for host at this instance's address, or "" when
+// there is none or the match is ambiguous. reconcile only calls it for a host that was absent from the
+// zone before the create, so a match is the record the failed create committed (or a concurrent writer
+// that chose the same name and address, whose record Stop would then also delete).
+func (p *Provider) findCreated(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), createTimeout)
+	defer cancel()
+	records, err := p.dns.ListRecords(ctx)
+	if err != nil {
+		return "", err
+	}
+	id, n := "", 0
+	for _, r := range records {
+		if dnsname.Canonical(r.Hostname) == host && r.IP == p.address && r.RecordType == "A" && r.ID != "" {
+			id, n = r.ID, n+1
+		}
+	}
+	if n != 1 {
+		return "", nil
+	}
+	if _, known := p.created[id]; known {
+		return "", nil
+	}
+	return id, nil
 }
 
 func (p *Provider) logError(operation string, err error) {

@@ -140,6 +140,114 @@ func TestHandleEvent_Start(t *testing.T) {
 	}
 }
 
+func TestHandleEvent_Start_ReservedHostnameRefused(t *testing.T) {
+	s := newFakeStore()
+	p := newFakeProvider()
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default()).
+		WithReservedHostnames("Unifi.home.arpa.")
+
+	err := r.HandleEvent(context.Background(), docker.Event{
+		Type:        "start",
+		ContainerID: "container-evil",
+		Labels: map[string]string{
+			"dns.bollard/hostname":    "unifi.home.arpa",
+			"dns.bollard/ip-override": "10.6.6.6",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for reserved hostname")
+	}
+	if len(p.records) != 0 {
+		t.Fatalf("reserved hostname must not reach UniFi, got %d records", len(p.records))
+	}
+	if rec, _ := s.GetByContainerID(context.Background(), "container-evil"); rec != nil {
+		t.Fatal("reserved hostname must not create a store row")
+	}
+}
+
+// cancelOnCreateStore cancels the caller's context while the ownership write fails, like SIGTERM
+// arriving between the UniFi POST and the store insert.
+type cancelOnCreateStore struct {
+	*fakeStore
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnCreateStore) Create(context.Context, store.Record) error {
+	c.cancel()
+	return context.Canceled
+}
+
+// ctxAwareProvider fails deletes issued on a cancelled context, as the real transport does.
+type ctxAwareProvider struct{ *fakeProvider }
+
+func (c *ctxAwareProvider) DeleteRecord(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.fakeProvider.DeleteRecord(ctx, id)
+}
+
+func TestCreateRecord_RollbackSurvivesShutdownCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &ctxAwareProvider{newFakeProvider()}
+	r := reconciler.New(&cancelOnCreateStore{newFakeStore(), cancel}, p, nil, "192.168.1.1", nil, slog.Default())
+
+	err := r.HandleEvent(ctx, docker.Event{
+		Type: "start", ContainerID: "c1",
+		Labels: map[string]string{"dns.bollard/hostname": "rollback.home.arpa"},
+	})
+	if err == nil {
+		t.Fatal("expected the failed ownership write to be reported")
+	}
+	if len(p.records) != 0 {
+		t.Fatalf("UniFi record left behind with no ownership row: %v", p.records)
+	}
+}
+
+func TestReconcileAndAdopt_ReservedHostnameRefused(t *testing.T) {
+	labels := map[string]string{
+		"dns.bollard/hostname":    "Unifi.Home.Arpa.",
+		"dns.bollard/ip-override": "10.6.6.6",
+	}
+	running := map[string]map[string]string{"container-evil": labels}
+
+	t.Run("pass3 vacant name", func(t *testing.T) {
+		s, p := newFakeStore(), newFakeProvider()
+		r := reconciler.New(s, p, &fakeLister{containers: running}, "192.168.1.1", nil, slog.Default()).
+			WithReservedHostnames("unifi.home.arpa")
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		if len(p.records) != 0 {
+			t.Fatalf("reserved hostname must not be created, got %d records", len(p.records))
+		}
+	})
+
+	t.Run("adopt vacant name", func(t *testing.T) {
+		s, p := newFakeStore(), newFakeProvider()
+		r := reconciler.New(s, p, nil, "192.168.1.1", nil, slog.Default()).WithReservedHostnames("unifi.home.arpa")
+		if err := r.Adopt(context.Background(), running); err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		if len(p.records) != 0 {
+			t.Fatalf("reserved hostname must not be created, got %d records", len(p.records))
+		}
+	})
+
+	t.Run("adopt existing operator record", func(t *testing.T) {
+		s, p := newFakeStore(), newFakeProvider()
+		p.records["op-1"] = unifi.DNSRecord{ID: "op-1", Hostname: "unifi.home.arpa", IP: "10.6.6.6", RecordType: "A"}
+		r := reconciler.New(s, p, nil, "192.168.1.1", nil, slog.Default()).WithReservedHostnames("unifi.home.arpa")
+		if err := r.Adopt(context.Background(), running); err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		if rec, _ := s.GetByContainerID(context.Background(), "container-evil"); rec != nil {
+			t.Fatal("operator's controller record must not be adopted")
+		}
+	})
+}
+
 func TestHandleEvent_Stop(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
@@ -253,7 +361,7 @@ func TestHandleStop_DeletesRowAndRecord(t *testing.T) {
 func TestReconcile_RetriesDeleteForStoppedContainer(t *testing.T) {
 	s := newFakeStore()
 	p := newFakeProvider()
-	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+	r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{"container-other": {}}}, "192.168.1.1", nil, slog.Default())
 
 	_ = s.Create(context.Background(), store.Record{
 		ID: "rec-3", ContainerID: "container-dead",
@@ -273,6 +381,89 @@ func TestReconcile_RetriesDeleteForStoppedContainer(t *testing.T) {
 	}
 	if _, ok := p.records["unifi-dead"]; ok {
 		t.Error("expected unifi record deleted by retry pass")
+	}
+}
+
+func TestReconcile_EmptyListsDeferDestructivePassesOneTick(t *testing.T) {
+	seed := func(s *fakeStore, p *fakeProvider) {
+		_ = s.Create(context.Background(), store.Record{
+			ID: "rec-e", ContainerID: "container-e",
+			Hostname: "e.home.arpa", IP: "192.168.1.1", RecordType: "A",
+			TTL: 300, UnifiRecordID: "unifi-e",
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		})
+		p.records["unifi-e"] = unifi.DNSRecord{ID: "unifi-e", Hostname: "e.home.arpa", IP: "192.168.1.1"}
+	}
+
+	t.Run("empty container list does not delete on first tick", func(t *testing.T) {
+		s, p := newFakeStore(), newFakeProvider()
+		seed(s, p)
+		r := reconciler.New(s, p, &fakeLister{containers: map[string]map[string]string{}}, "192.168.1.1", nil, slog.Default())
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := p.records["unifi-e"]; !ok {
+			t.Fatal("record deleted on the first empty-list tick")
+		}
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := p.records["unifi-e"]; ok {
+			t.Fatal("record not deleted when the empty list repeated")
+		}
+	})
+
+	t.Run("empty UniFi list does not drop rows on first tick", func(t *testing.T) {
+		s, p := newFakeStore(), newFakeProvider()
+		seed(s, p)
+		delete(p.records, "unifi-e")
+		running := map[string]map[string]string{"container-e": {}}
+		r := reconciler.New(s, p, &fakeLister{containers: running}, "192.168.1.1", nil, slog.Default())
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if rec, _ := s.GetByContainerID(context.Background(), "container-e"); rec == nil {
+			t.Fatal("ownership row dropped on the first empty-list tick")
+		}
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if rec, _ := s.GetByContainerID(context.Background(), "container-e"); rec != nil {
+			t.Fatal("orphaned row not cleaned when the empty list repeated")
+		}
+	})
+}
+
+// A non-empty answer between two empty ones proves the empty answers were not consecutive, so the
+// pass must be deferred again rather than acting on the second empty list.
+func TestReconcile_NonEmptyListResetsEmptyCounter(t *testing.T) {
+	ctx := context.Background()
+	s, p := newFakeStore(), newFakeProvider()
+	_ = s.Create(ctx, store.Record{
+		ID: "rec-e", ContainerID: "container-e", Hostname: "e.home.arpa", IP: "192.168.1.1",
+		RecordType: "A", TTL: 300, UnifiRecordID: "unifi-e", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	p.records["unifi-e"] = unifi.DNSRecord{ID: "unifi-e", Hostname: "e.home.arpa", IP: "192.168.1.1"}
+	lister := &fakeLister{containers: map[string]map[string]string{}}
+	r := reconciler.New(s, p, lister, "192.168.1.1", nil, slog.Default())
+
+	steps := []struct {
+		running     map[string]map[string]string
+		wantPresent bool
+	}{
+		{map[string]map[string]string{}, true},                  // empty: deferred
+		{map[string]map[string]string{"container-e": {}}, true}, // non-empty: counter resets
+		{map[string]map[string]string{}, true},                  // empty again: deferred, not acted on
+		{map[string]map[string]string{}, false},                 // second consecutive empty: acted on
+	}
+	for i, st := range steps {
+		lister.containers = st.running
+		if err := r.Reconcile(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := p.records["unifi-e"]; ok != st.wantPresent {
+			t.Fatalf("step %d: record present=%v, want %v", i, ok, st.wantPresent)
+		}
 	}
 }
 
