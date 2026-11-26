@@ -20,7 +20,8 @@ Log messages you should recognise (abridged):
 | `created DNS record` / `deleted DNS record` | Normal lifecycle |
 | `invalid labels on container` | Container skipped; fix labels |
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
-| `hostname ... is reserved` / `reconcile: hostname is reserved` / `adopt: hostname is reserved` | A label asked for a reserved name (daemon only); the record was not created or adopted. See [SECURITY.md](../SECURITY.md#defaults-to-review) |
+| `hostname ... is reserved` / `reconcile: hostname is reserved` / `adopt: hostname is reserved` | A label asked for a reserved name; the record was not created or adopted. See [SECURITY.md](../SECURITY.md#defaults-to-review) |
+| `hostname ... is reserved, not creating it` | Plugin only: a router rule named the UniFi host, the Traefik API host, `localhost` or a Docker host alias; no record was created |
 | `UniFi TLS certificate verification is disabled` | `UNIFI_SKIP_TLS_VERIFY=true` with no `UNIFI_CA_CERT`; the API key is exposed to anyone who can impersonate the controller |
 | `UniFi list is empty but store has rows` / `container list is empty but store has rows` | A suspicious empty list. Orphan cleanup or deletes are deferred one tick and run if the list is still empty on the next |
 | `rollback delete of unowned UniFi record failed` | A record was created but its ownership row could not be saved, and the cleanup delete failed. Delete the named record by hand |
