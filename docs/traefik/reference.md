@@ -9,7 +9,9 @@ Exact behavior of the plugin, taken from `traefik/provider.go`, `traefik/rules.g
 | `unifiSite` match (modern API) | Display name or UUID | Also matches internal references such as `default` | Same as v0.7.1 |
 | Existing-record check | Enabled A records only | All named records | All named records |
 | Write coordination | None | None | Serialized within a shared plugin runtime for the same controller hostname; not across aliases or replicas |
-| Shutdown | Leaves all records | Leaves all records | Deletes the records this instance created; failures are logged and do not stop the rest |
+| Shutdown | Leaves all records | Leaves all records | Deletes the records this instance created; failures are logged and do not stop the rest. Concurrent `Stop` calls clean up once |
+| Failed create | Not tracked | Not tracked | After an ambiguous failure, tracks the one matching record so shutdown deletes it; never after a 4xx |
+| Reserved names | Not checked | Not checked | Skips the UniFi host, the Traefik API host, `localhost` and Docker host aliases |
 
 Release tags do not guarantee catalog availability. Use the [local plugin overlay](how-to.md#develop-with-a-local-plugin) if the version you need is not served.
 
@@ -110,10 +112,10 @@ A name is valid when it is at most 253 characters, not an IP, and every dot-sepa
 The worker sends an empty configuration `{}` to Traefik once (the plugin supplies no routes), then loops:
 
 1. Discover hostnames. On error, log `DNS discovery failed: ...` and wait.
-2. If there are no hostnames, stop the iteration. UniFi is **not contacted**, so UniFi, CA, and site errors stay invisible until a route exists.
+2. Drop reserved names: the `unifiHost` host, the `traefikAPI` host, `localhost`, and Docker's host aliases (`host.docker.internal` and the legacy `docker.for.*` names). Each is logged as `hostname <host> is reserved, not creating it`. If no hostnames remain, stop the iteration. UniFi is **not contacted**, so UniFi, CA, and site errors stay invisible until a route exists.
 3. Build the UniFi client if not cached (see [deferred validation](#deferred-validation)).
 4. List UniFi records. For each record, compare `hostname` lowercased with one trailing dot removed. A discovered name that matches is removed from the work list; if the record's IP differs from `address`, log `DNS conflict for <host>: existing record preserved`. (This prints every poll while the conflict stands.)
-5. For each remaining name in alphabetical order, create one A record. A failed create is logged as `create DNS record for <host>: ...` and the loop continues; later polls retry. Success logs `created A record <host> -> <address>`.
+5. For each remaining name in alphabetical order, create one A record. A failed create is logged as `create DNS record for <host>: ...` and the loop continues; later polls retry. Success logs `created A record <host> -> <address>`. After a failure that is not a 4xx answer (timeout, lost response, 5xx, no ID), the plugin lists once more. If exactly one A record has that name and `address`, it is tracked so shutdown deletes it, and the plugin logs `recovered A record <host> after a failed create`. One failed lookup disables further lookups for that poll. A 4xx (for example 409) means another writer's record won, so nothing is tracked.
 6. Wait `pollInterval`, or exit on shutdown.
 
 Polls on one instance never overlap.
@@ -149,7 +151,7 @@ Any other site-probe failure is an error and does not fall back.
 
 ### Response handling
 
-The plugin lists and creates during polling, and deletes only at shutdown (see [Record shape](#record-shape)). In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`).
+The plugin lists and creates during polling, and deletes only at shutdown (see [Record shape](#record-shape)). In current source, a list response that has no record list (`data` missing or `null`) is an error (`unifi: list records: response has no data`) rather than an empty zone. The poll creates nothing and logs the error, then retries on the next poll. A truly empty zone must return an empty list. A create response without an ID is also an error (`unifi: create returned no record ID`). A listing stops with an error after 100,000 records or 60 seconds.
 
 ## Limits
 

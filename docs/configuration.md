@@ -38,7 +38,7 @@ Site selector. Matched against the controller's site **name**, **ID**, or **inte
 
 ### `UNIFI_SKIP_TLS_VERIFY`
 
-Default **`true`**: TLS certificate errors from the controller are ignored. That default exists so self-signed controllers work out of the box, but it lets anyone on the path impersonate the controller and read the API key. Set `false` for anything beyond a trusted home LAN, and use `UNIFI_CA_CERT` for a private CA.
+Default **`true`**: TLS certificate errors from the controller are ignored. That default exists so self-signed controllers work out of the box, but it lets anyone on the path impersonate the controller and read the API key. bollard logs a startup warning while this is in effect without `UNIFI_CA_CERT`. Set `false` for anything beyond a trusted home LAN, and use `UNIFI_CA_CERT` for a private CA.
 
 ```bash
 UNIFI_SKIP_TLS_VERIFY=false                 # verify with the system trust store

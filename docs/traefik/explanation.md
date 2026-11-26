@@ -27,7 +27,7 @@ Each provider polls sequentially. Provider instances sharing one loaded plugin r
 
 Traefik loads separately registered plugin aliases in separate interpreters. They do not share the guard, even in one process. Different controller hostnames, separate Traefik processes, and other tools also bypass it. Two writers outside the guard can see the same name as free and both try to create it. What happens next depends on UniFi:
 
-- If UniFi rejects the duplicate (for example with a 409), one record wins and the loser logs a failed create. The plugin never overwrites or retries blindly.
+- If UniFi rejects the duplicate (for example with a 409), one record wins and the loser logs a failed create. The plugin never overwrites or retries blindly, and it never tracks the winner's record, so the loser's shutdown does not delete it. Only failures that are not a 4xx answer (timeouts, lost responses) trigger the recovery lookup, and then only for a single exact name-and-address match.
 - If UniFi accepts duplicates, both records exist. The plugin deletes only the one it created, and only at shutdown.
 
 Both outcomes are covered by tests with a simulated remote writer. Matching target IPs do not prevent duplicates.

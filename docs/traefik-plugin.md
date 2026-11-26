@@ -20,6 +20,6 @@ Choose the plugin when Traefik already fronts your services and you want no Dock
 - Tag `v0.7.1` can match the site's `internalReference` and protects every named UniFi record from a duplicate plugin create, regardless of type or enabled state.
 - Catalog indexing is separate from a Git tag. A tag existing does not prove Traefik's plugin catalog serves it; use the [local plugin overlay](traefik/how-to.md#develop-with-a-local-plugin) when you cannot depend on the catalog.
 - Validated against Traefik `3.7.19`. Traefik plugin loading is experimental; revalidate before changing versions.
-- Unreleased source adds serialized writes within one plugin runtime, stricter UniFi response checks, and deletion on shutdown of the records the instance created. Run it only through the local overlay until a tag includes it; see [release differences](traefik/reference.md#release-differences).
+- Unreleased source adds serialized writes within one plugin runtime, stricter UniFi response checks, bounded UniFi listings, a reserved-name guard, recovery of records from ambiguous failed creates, and deletion on shutdown of the records the instance created. Run it only through the local overlay until a tag includes it; see [release differences](traefik/reference.md#release-differences).
 
 See [release differences](traefik/reference.md#release-differences) for behavior added after each tag.

@@ -77,7 +77,7 @@ INF msg="state store ready" owned_records=0
 INF msg="bollard started" reconcile_interval=5m0s
 ```
 
-`unifi_tls_verify=false` here means verification is off (the default). If bollard exits instead, see [Troubleshooting](#troubleshooting).
+`unifi_tls_verify=false` here means verification is off (the default), and a `UniFi TLS certificate verification is disabled` warning follows the banner. With `UNIFI_CA_CERT` set, the field reads `true` and there is no warning. If bollard exits instead, see [Troubleshooting](#troubleshooting).
 
 ## 4. Label a container
 

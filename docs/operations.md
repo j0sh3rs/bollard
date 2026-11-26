@@ -20,6 +20,7 @@ Log messages you should recognise (abridged):
 | `created DNS record` / `deleted DNS record` | Normal lifecycle |
 | `invalid labels on container` | Container skipped; fix labels |
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
+| `docker event stream error` | The Docker event stream ended while bollard was running (daemon restart, socket loss, or a stream that closed without an error). The process exits non-zero; the restart policy reconnects |
 | `hostname ... is reserved` / `reconcile: hostname is reserved` / `adopt: hostname is reserved` | A label asked for a reserved name; the record was not created or adopted. See [SECURITY.md](../SECURITY.md#defaults-to-review) |
 | `hostname ... is reserved, not creating it` | Plugin only: a router rule named the UniFi host, the Traefik API host, `localhost` or a Docker host alias; no record was created |
 | `UniFi TLS certificate verification is disabled` | `UNIFI_SKIP_TLS_VERIFY=true` with no `UNIFI_CA_CERT`; the API key is exposed to anyone who can impersonate the controller |
