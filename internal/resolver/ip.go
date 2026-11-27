@@ -14,17 +14,27 @@ func HostIP(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	return inferHostIP()
+	return inferHostIP(false)
 }
 
-func inferHostIP() (string, error) {
+// HostIPv6 returns override if non-empty. Otherwise it infers the host's single global or
+// unique-local IPv6 address on a non-virtual interface. Link-local and loopback addresses are never
+// candidates, so a host with only fe80:: addresses yields an error rather than an unroutable record.
+func HostIPv6(override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	return inferHostIP(true)
+}
+
+func inferHostIP(v6 bool) (string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "", fmt.Errorf("resolver: list interfaces: %w", err)
 	}
-	candidates, err := selectHostIP(ifaces)
-	if err != nil {
-		return "", err
+	candidates := selectHostIP(ifaces, v6)
+	if v6 {
+		return SelectCandidate6(candidates)
 	}
 	return SelectCandidate(candidates)
 }
@@ -41,9 +51,9 @@ func isDockerInterface(name string) bool {
 	return false
 }
 
-// selectHostIP extracts IPv4 addresses from non-virtual interfaces.
+// selectHostIP extracts addresses of one family from non-virtual interfaces.
 // Errors from inaccessible interfaces are silently skipped.
-func selectHostIP(ifaces []net.Interface) ([]string, error) {
+func selectHostIP(ifaces []net.Interface, v6 bool) []string {
 	var candidates []string
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
@@ -64,15 +74,29 @@ func selectHostIP(ifaces []net.Interface) ([]string, error) {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-				continue
-			}
-			if ip4 := ip.To4(); ip4 != nil {
-				candidates = append(candidates, ip4.String())
+			if s, ok := candidate(ip, v6); ok {
+				candidates = append(candidates, s)
 			}
 		}
 	}
-	return candidates, nil
+	return candidates
+}
+
+// candidate returns ip as a string when it is a usable address of the requested family.
+func candidate(ip net.IP, v6 bool) (string, bool) {
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return "", false
+	}
+	if v6 {
+		if ip.To4() == nil {
+			return ip.String(), true
+		}
+		return "", false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String(), true
+	}
+	return "", false
 }
 
 // SelectCandidate validates the candidate list and returns a single address or an error.
@@ -85,5 +109,17 @@ func SelectCandidate(candidates []string) (string, error) {
 		return candidates[0], nil
 	default:
 		return "", fmt.Errorf("resolver: multiple routable IPv4 addresses found (%v); set dns.bollard/ip-override explicitly", candidates)
+	}
+}
+
+// SelectCandidate6 is SelectCandidate for IPv6 addresses.
+func SelectCandidate6(candidates []string) (string, error) {
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("resolver: no routable IPv6 address found; set dns.bollard/ip-override")
+	case 1:
+		return candidates[0], nil
+	default:
+		return "", fmt.Errorf("resolver: multiple routable IPv6 addresses found (%v); set dns.bollard/ip-override explicitly", candidates)
 	}
 }

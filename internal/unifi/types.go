@@ -13,6 +13,8 @@ type DNSRecord struct {
 	RecordType string
 	TTL        int
 	Disabled   bool
+	// Target is the CNAME target hostname without a trailing dot; empty for other types.
+	Target string
 }
 
 // Config holds UniFi connection parameters.
@@ -52,15 +54,21 @@ func (c *Config) setDefaults() {
 
 // Modern API wire types.
 type dnsPolicyEnvelope struct {
-	ID          string `json:"id,omitempty"`
-	Type        string `json:"type"`
-	Enabled     bool   `json:"enabled"`
-	Domain      string `json:"domain,omitempty"`
-	IPv4Address string `json:"ipv4Address,omitempty"`
-	TTLSeconds  *int   `json:"ttlSeconds,omitempty"`
+	ID           string `json:"id,omitempty"`
+	Type         string `json:"type"`
+	Enabled      bool   `json:"enabled"`
+	Domain       string `json:"domain,omitempty"`
+	IPv4Address  string `json:"ipv4Address,omitempty"`
+	IPv6Address  string `json:"ipv6Address,omitempty"`
+	TargetDomain string `json:"targetDomain,omitempty"`
+	TTLSeconds   *int   `json:"ttlSeconds,omitempty"`
 }
 
-const policyTypeA = "A_RECORD"
+const (
+	policyTypeA     = "A_RECORD"
+	policyTypeAAAA  = "AAAA_RECORD"
+	policyTypeCNAME = "CNAME_RECORD"
+)
 
 type dnsPolicyPage struct {
 	Count      int                 `json:"count"`

@@ -9,7 +9,7 @@ Bollard has two runtimes in one Go module, `github.com/j0sh3rs/bollard`: the sta
 | `main.go` | Daemon entry point: startup, UniFi retry, metrics listener, shutdown |
 | `internal/unifi` | UniFi client shared by the daemon and the plugin |
 | `internal/dnsname` | Hostname validation and normalization shared by both |
-| `internal/reconciler`, `internal/store`, `internal/docker`, `internal/resolver`, `internal/config`, `internal/log`, `internal/metrics` | Daemon only |
+| `internal/reconciler`, `internal/store`, `internal/docker`, `internal/dryrun`, `internal/resolver`, `internal/config`, `internal/log`, `internal/metrics` | Daemon only |
 | `traefik/` | Plugin. Runs under Traefik's Yaegi interpreter |
 | `docs/` | User documentation, organised by [Diátaxis](https://diataxis.fr/) type |
 | `dev/` | Local Compose project with a labelled test container |
@@ -19,6 +19,10 @@ The plugin may import only the standard library, `internal/dnsname`, and `intern
 ## Checks
 
 ```sh
+gofmt -l .                      # must print nothing
+go vet ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 go test -race ./...
 go build ./...
 TRAEFIK_IMAGE=traefik:v3.7.19 go test -race ./traefik -run TestTraefikPlugin -v -count=1

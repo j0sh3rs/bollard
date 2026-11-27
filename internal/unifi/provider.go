@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,47 @@ type DNSProvider interface {
 	ListRecords(ctx context.Context) ([]DNSRecord, error)
 	CreateRecord(ctx context.Context, r DNSRecord) (string, error)
 	DeleteRecord(ctx context.Context, unifiID string) error
+}
+
+// RecordUpdater replaces an existing record in place. Both providers implement it;
+// it is separate from DNSProvider so existing implementations stay valid.
+type RecordUpdater interface {
+	UpdateRecord(ctx context.Context, id string, r DNSRecord) error
+}
+
+var (
+	_ RecordUpdater = (*modernProvider)(nil)
+	_ RecordUpdater = (*legacyProvider)(nil)
+)
+
+// policyFromRecord builds the modern wire envelope for a supported record type.
+func policyFromRecord(r DNSRecord) (dnsPolicyEnvelope, error) {
+	ttl := r.TTL
+	env := dnsPolicyEnvelope{Enabled: true, Domain: r.Hostname, TTLSeconds: &ttl}
+	switch r.RecordType {
+	case "A":
+		env.Type, env.IPv4Address = policyTypeA, r.IP
+	case "AAAA":
+		env.Type, env.IPv6Address = policyTypeAAAA, r.IP
+	case "CNAME":
+		env.Type, env.TargetDomain = policyTypeCNAME, r.Target
+	default:
+		return env, fmt.Errorf("unifi: unsupported record type %q", r.RecordType)
+	}
+	return env, nil
+}
+
+// entryFromRecord builds the legacy wire entry for a supported record type.
+func entryFromRecord(r DNSRecord) (staticDNSEntry, error) {
+	e := staticDNSEntry{Key: r.Hostname, Value: r.IP, RecordType: r.RecordType, TTL: r.TTL, Enabled: true}
+	switch r.RecordType {
+	case "A", "AAAA":
+	case "CNAME":
+		e.Value = r.Target
+	default:
+		return e, fmt.Errorf("unifi: unsupported record type %q", r.RecordType)
+	}
+	return e, nil
 }
 
 var errModernUnsupported = errors.New("unifi: modern API unsupported")
@@ -179,17 +221,21 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 			if env.TTLSeconds != nil {
 				ttl = *env.TTLSeconds
 			}
-			recordType := env.Type
-			if env.Type == policyTypeA {
-				recordType = "A"
-			} else if recordType == "A" {
+			rec := DNSRecord{ID: env.ID, Hostname: env.Domain, IP: env.IPv4Address, TTL: ttl, Disabled: !env.Enabled}
+			switch env.Type {
+			case policyTypeA:
+				rec.RecordType = "A"
+			case policyTypeAAAA:
+				rec.RecordType, rec.IP = "AAAA", env.IPv6Address
+			case policyTypeCNAME:
+				rec.RecordType, rec.IP, rec.Target = "CNAME", "", strings.TrimSuffix(env.TargetDomain, ".")
+			case "A":
 				// A wire type literally named "A" is not UniFi's A-record policy.
-				recordType = "UNSUPPORTED_A"
+				rec.RecordType = "UNSUPPORTED_A"
+			default:
+				rec.RecordType = env.Type
 			}
-			all = append(all, DNSRecord{
-				ID: env.ID, Hostname: env.Domain, IP: env.IPv4Address,
-				RecordType: recordType, TTL: ttl, Disabled: !env.Enabled,
-			})
+			all = append(all, rec)
 		}
 		offset += len(page.Data)
 		if offset >= page.TotalCount {
@@ -203,10 +249,9 @@ func (p *modernProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 }
 
 func (p *modernProvider) CreateRecord(ctx context.Context, r DNSRecord) (string, error) {
-	ttl := r.TTL
-	env := dnsPolicyEnvelope{
-		Type: policyTypeA, Enabled: true,
-		Domain: r.Hostname, IPv4Address: r.IP, TTLSeconds: &ttl,
+	env, err := policyFromRecord(r)
+	if err != nil {
+		return "", err
 	}
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -224,6 +269,29 @@ func (p *modernProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 		return "", errors.New("unifi: create returned no record ID")
 	}
 	return created.ID, nil
+}
+
+func (p *modernProvider) UpdateRecord(ctx context.Context, id string, r DNSRecord) error {
+	if id == "" {
+		return errors.New("unifi: record ID required for update")
+	}
+	env, err := policyFromRecord(r)
+	if err != nil {
+		return err
+	}
+	env.ID = id
+	body, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("unifi: marshal record: %w", err)
+	}
+	_, status, err := p.transport.do(ctx, http.MethodPut, fmt.Sprintf("%s/%s", p.policiesURL(), id), body)
+	if err != nil {
+		return fmt.Errorf("unifi: update record %s: %w", id, err)
+	}
+	if status == http.StatusAccepted {
+		return fmt.Errorf("unifi: update record %s accepted but not completed", id)
+	}
+	return nil
 }
 
 func (p *modernProvider) DeleteRecord(ctx context.Context, unifiID string) error {
@@ -272,18 +340,24 @@ func (p *legacyProvider) ListRecords(ctx context.Context) ([]DNSRecord, error) {
 		if !p.cfg.IncludeAllRecords && (!e.Enabled || e.RecordType != "A") {
 			continue
 		}
-		records = append(records, DNSRecord{
+		rec := DNSRecord{
 			ID: e.ID, Hostname: e.Key, IP: e.Value, RecordType: e.RecordType, TTL: e.TTL,
 			Disabled: !e.Enabled,
-		})
+		}
+		if e.RecordType == "CNAME" {
+			rec.IP, rec.Target = "", strings.TrimSuffix(e.Value, ".")
+		}
+		records = append(records, rec)
 	}
 	return records, nil
 }
 
 func (p *legacyProvider) CreateRecord(ctx context.Context, r DNSRecord) (string, error) {
-	body, err := json.Marshal(staticDNSEntry{
-		Key: r.Hostname, Value: r.IP, RecordType: "A", TTL: r.TTL, Enabled: true,
-	})
+	entry, err := entryFromRecord(r)
+	if err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(entry)
 	if err != nil {
 		return "", fmt.Errorf("unifi: marshal legacy record: %w", err)
 	}
@@ -300,6 +374,29 @@ func (p *legacyProvider) CreateRecord(ctx context.Context, r DNSRecord) (string,
 		return "", fmt.Errorf("unifi: legacy create returned no id")
 	}
 	return created.ID, nil
+}
+
+func (p *legacyProvider) UpdateRecord(ctx context.Context, id string, r DNSRecord) error {
+	if id == "" {
+		return errors.New("unifi: record ID required for update")
+	}
+	entry, err := entryFromRecord(r)
+	if err != nil {
+		return err
+	}
+	entry.ID = id
+	body, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("unifi: marshal legacy record: %w", err)
+	}
+	_, status, err := p.transport.do(ctx, http.MethodPut, fmt.Sprintf("%s/%s", p.baseURL(), id), body)
+	if err != nil {
+		return fmt.Errorf("unifi: legacy update %s: %w", id, err)
+	}
+	if status == http.StatusAccepted {
+		return fmt.Errorf("unifi: legacy update %s accepted but not completed", id)
+	}
+	return nil
 }
 
 func (p *legacyProvider) DeleteRecord(ctx context.Context, unifiID string) error {

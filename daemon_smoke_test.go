@@ -56,6 +56,7 @@ func TestDaemonImageSmoke(t *testing.T) {
 	var mu sync.Mutex
 	var owned *policy
 	var deleted bool
+	var creates int
 	var siteProbes int
 	listener, err := net.Listen("tcp4", ":0")
 	if err != nil {
@@ -86,13 +87,14 @@ func TestDaemonImageSmoke(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == policies:
 			var got policy
 			want := policy{"", "A_RECORD", hostname, ip, 120, true}
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil || got != want || owned != nil || deleted {
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil || got != want || owned != nil {
 				t.Errorf("unexpected DNS mutation: POST %+v (decode error: %v)", got, err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			got.ID = ownedID
 			owned = &got
+			creates++
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(got)
 		case r.Method == http.MethodDelete && r.URL.Path == policies+"/"+ownedID && owned != nil:
@@ -193,14 +195,41 @@ func TestDaemonImageSmoke(t *testing.T) {
 		defer mu.Unlock()
 		return deleted && owned == nil
 	})
+
+	// Restart: the stop deleted the record, so the next start creates it again.
+	smokeDockerOK(t, append(nested, "start", workload)...)
+	smokeWait(t, "DNS creation after restart", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return owned != nil && creates == 2
+	})
+
+	// Someone deletes the record in the UniFi UI. Reconcile drops the orphaned ownership row, then
+	// re-registers the still-running container, so the record comes back without any Docker event.
+	mu.Lock()
+	owned = nil
+	mu.Unlock()
+	smokeWait(t, "DNS re-creation by reconcile after external deletion", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return owned != nil && creates == 3
+	})
+	smokeDockerOK(t, append(nested, "stop", "--time", "1", workload)...)
+	smokeWait(t, "owned DNS deletion after the final stop", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return owned == nil
+	})
 	exposition := smokeDockerOK(t, "run", "--rm", "--pull=never", "--network", "container:"+daemon,
 		workloadImage, "wget", "-qO-", "http://127.0.0.1:9190/metrics")
 	exposition = "\n" + exposition + "\n"
 	for _, want := range []string{
 		`bollard_unifi_requests_total{method="GET",status="503"} 3`,
-		`bollard_unifi_requests_total{method="POST",status="201"} 1`,
-		`bollard_unifi_request_duration_seconds_count{method="POST"} 1`,
+		`bollard_unifi_requests_total{method="POST",status="201"} 3`,
+		`bollard_unifi_request_duration_seconds_count{method="POST"} 3`,
 		`bollard_unifi_api_version{provider="modern"} 1`,
+		`bollard_reconcile_orphans_cleaned_total 1`,
+		`bollard_reconcile_missed_recovered_total 1`,
 		`bollard_up 1`,
 	} {
 		if !strings.Contains(exposition, "\n"+want+"\n") {

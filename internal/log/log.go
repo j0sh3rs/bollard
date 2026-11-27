@@ -26,7 +26,7 @@ func NewWithWriter(format, level string, w io.Writer) (*slog.Logger, error) {
 	var handler slog.Handler
 	switch format {
 	case "logfmt":
-		handler = tint.NewHandler(w, &tint.Options{
+		handler = tint.NewTextHandler(w, &tint.Options{
 			Level:      lvl,
 			TimeFormat: time.RFC3339,
 		})

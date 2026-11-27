@@ -1,6 +1,6 @@
 # Reference: Traefik provider plugin
 
-Exact behavior of the plugin, taken from `traefik/provider.go`, `traefik/rules.go`, and `internal/unifi`. For recipes see the [how-to guides](how-to.md); for rationale see the [explanation](explanation.md).
+Exact behavior of the plugin, taken from `traefik/provider.go`, `internal/dnsname/rules.go`, and `internal/unifi`. For recipes see the [how-to guides](how-to.md); for rationale see the [explanation](explanation.md).
 
 ## Release differences
 

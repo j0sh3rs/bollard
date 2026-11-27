@@ -9,7 +9,7 @@ Metrics and alerting for the **standalone Docker daemon**. The Traefik plugin ex
 | `GET /metrics` | Prometheus exposition format |
 | `GET /healthz` | Returns HTTP 200 while the process serves HTTP. It does not test UniFi, Docker, or the store |
 
-Both endpoints are served on `METRICS_ADDR` (default `:9090`, all interfaces) with no authentication. Bind to loopback or restrict access with a firewall or network policy. See [host-qualified examples](configuration.md#metrics_addr).
+Both endpoints are served on `METRICS_ADDR` with no authentication. The default is the loopback address `127.0.0.1:9090`, which only processes in the container's own network namespace can reach; the image healthcheck runs there. To scrape from Prometheus, set `METRICS_ADDR=:9090` (or a specific interface address) and restrict access with a firewall, a private Docker network or a reverse proxy. See [host-qualified examples](configuration.md#metrics_addr).
 
 The registry also exposes the default Go and process collectors.
 
@@ -225,3 +225,5 @@ scrape_configs:
 ```
 
 With `network_mode: host`, use the host's address. A working Compose stack with Prometheus is in [`examples/monitoring-compose.yml`](examples/monitoring-compose.yml).
+
+bollard binds `127.0.0.1:9090` by default, so the target above is unreachable until you set `METRICS_ADDR` (for example `METRICS_ADDR=:9090`) on the bollard container. Keep the port off the public network: nothing on it is authenticated.

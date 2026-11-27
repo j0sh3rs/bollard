@@ -10,6 +10,24 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -40,6 +58,13 @@ jobs:
         run: go build ./...
       - name: Build daemon smoke image
         run: docker build --build-arg VERSION=v0.0.0-smoke -t bollard:smoke .
+      - name: Scan daemon image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: bollard:smoke
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
       - name: Smoke test daemon image
         env:
           BOLLARD_SMOKE_IMAGE: bollard:smoke
