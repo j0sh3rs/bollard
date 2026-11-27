@@ -50,6 +50,24 @@
 * Stamp the build version in release binaries and images; expose it with `-version`.
 * Build and smoke-test the daemon image in CI against Docker and a simulated UniFi API.
 
+## [0.8.0](https://github.com/j0sh3rs/bollard/compare/v0.7.2...v0.8.0) (2026-11-27)
+
+
+### Features
+
+* 0.8.0 P0/P1 roadmap work (records, operations, security scans) ([#39](https://github.com/j0sh3rs/bollard/issues/39)) ([b71897c](https://github.com/j0sh3rs/bollard/commit/b71897c4617eb9eab7ece831174a88475a160fa5))
+* **traefik:** Add record deletions to clean up upon traefik shutdown ([#36](https://github.com/j0sh3rs/bollard/issues/36)) ([bc6bc53](https://github.com/j0sh3rs/bollard/commit/bc6bc53437354a2ee44e193f802d5f82474500c2))
+
+
+### Bug Fixes
+
+* harden event stream exit, empty-list guards, create recovery and plugin cleanup ([#38](https://github.com/j0sh3rs/bollard/issues/38)) ([24e8ea9](https://github.com/j0sh3rs/bollard/commit/24e8ea9d8090012a34bf650a92c9f4475f6cfe93))
+
+
+### Chores
+
+* **deps:** Update sigstore/cosign-installer action to v4.1.4 ([#35](https://github.com/j0sh3rs/bollard/issues/35)) ([ade6f76](https://github.com/j0sh3rs/bollard/commit/ade6f76e98316770103b2744103d9ce8d167418a))
+
 ## [0.7.2](https://github.com/j0sh3rs/bollard/compare/v0.7.1...v0.7.2) (2026-11-25)
 
 
