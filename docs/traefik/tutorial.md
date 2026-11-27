@@ -2,7 +2,7 @@
 
 You will run Traefik 3.7.19, an nginx backend, and the Bollard plugin with Docker Compose. Traefik routes `app.home.arpa` to nginx. Bollard notices that route and creates `app.home.arpa → <Traefik IP>` in UniFi DNS. You then prove routing and DNS separately.
 
-The Compose project loads Bollard plugin release `v0.7.2`. <!-- x-release-please-version -->
+The Compose project loads Bollard plugin release `v0.8.0`. <!-- x-release-please-version -->
 
 You know Docker and Traefik. You do not need to know Bollard or the UniFi API.
 

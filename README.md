@@ -30,7 +30,7 @@ experimental:
   plugins:
     bollard:
       moduleName: github.com/j0sh3rs/bollard
-      version: v0.7.2
+      version: v0.8.0
 ```
 <!-- x-release-please-end -->
 

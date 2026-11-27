@@ -25,7 +25,7 @@ experimental:
   plugins:               # or localPlugins (no version) for a local checkout
     bollard:
       moduleName: github.com/j0sh3rs/bollard
-      version: "v0.7.2"
+      version: "v0.8.0"
 providers:
   plugin:
     bollard:             # must match the registration name
@@ -177,7 +177,7 @@ The plugin lists and creates during polling, and deletes only at shutdown (see [
 | `TRAEFIK_ADDRESS` | required | `address` |
 | `APP_HOST` | `app.home.arpa` | nginx router host |
 | `POLL_INTERVAL` | `30s` | `pollInterval` |
-| `BOLLARD_VERSION` | `v0.7.2` | Plugin tag (remote mode only) | <!-- x-release-please-version -->
+| `BOLLARD_VERSION` | `v0.8.0` | Plugin tag (remote mode only) | <!-- x-release-please-version -->
 | `HTTP_BIND`, `HTTP_PORT` | `127.0.0.1`, `8000` | Host side of the published port 80 |
 | `TRAEFIK_IMAGE`, `RENDER_IMAGE` | `traefik:v3.7.19`, `busybox:stable` | Images |
 | `UNIFI_API_KEY_FILE` | `./secrets/unifi_api_key` | Host path of the key file secret |
