@@ -4,16 +4,16 @@
 [![Traefik plugin](https://github.com/j0sh3rs/bollard/actions/workflows/traefik-plugin.yml/badge.svg)](https://github.com/j0sh3rs/bollard/actions/workflows/traefik-plugin.yml)
 [![Release](https://github.com/j0sh3rs/bollard/actions/workflows/release-please.yml/badge.svg)](https://github.com/j0sh3rs/bollard/actions/workflows/release-please.yml)
 
-Automatically create UniFi DNS A records for self-hosted services. Choose the Traefik provider plugin for router-driven DNS, or the standalone controller for Docker-label-driven DNS with ownership tracking and cleanup.
+Automatically create UniFi DNS records (A, and AAAA and CNAME in the standalone controller) for self-hosted services. Choose the Traefik provider plugin for router-driven DNS, or the standalone controller for Docker-label-driven DNS with ownership tracking and cleanup.
 
 ## Choose a mode
 
 | | Traefik provider plugin | Standalone Docker controller |
 |---|---|---|
 | Discovery | Enabled HTTP router `Host()` rules through Traefik's API | Opted-in Docker container labels and events |
-| DNS target | Explicit client-reachable Traefik IPv4 address | Inferred host IPv4 or per-container override |
+| DNS target | Explicit client-reachable Traefik IPv4 address | The container's macvlan or chosen-network address, else the inferred host address, or a per-container override |
 | State | Rebuilt from Traefik and UniFi each poll; no database | Ownership database in SQLite or PostgreSQL |
-| Creates A records | Yes | Yes |
+| Creates records | A | A, AAAA and CNAME |
 | Deletes records | Only the ones it created, at Traefik shutdown (releases after v0.7.2) | Deletes owned records on stop; reconciliation catches missed stops and retries failed deletes |
 | Docker socket required by Bollard | No | Yes |
 | Runs as | A Traefik provider plugin | A separate service |
@@ -84,11 +84,11 @@ Opt an existing application into DNS management:
 
 ```yaml
 labels:
-  dns.bollard/hostname: app.home.arpa
-  dns.bollard/ip-override: "192.0.2.10" # Replace with the address clients should use.
+  dns.bollard/hostname: app.home.arpa, www.home.arpa # one or more names
+  dns.bollard/ip-override: "192.0.2.10"              # Replace with the address clients should use.
 ```
 
-The explicit IP avoids host-interface ambiguity. Replace the documentation address with a reachable address. Persist and back up the ownership database; recover lost ownership with `--adopt`, not by deleting records. See the [standalone tutorial](docs/getting-started.md) and [operations guide](docs/operations.md).
+The explicit IP avoids host-interface ambiguity. Replace the documentation address with a reachable address. A container on a macvlan network publishes its own address automatically, `dns.bollard/network` picks another network's address, and `dns.bollard/record-type` can be `AAAA` or `CNAME` (with `dns.bollard/target`). Persist and back up the ownership database; recover lost ownership with `--adopt`, not by deleting records. Try new labels with `DRY_RUN=true` first. See the [standalone tutorial](docs/getting-started.md), the [label reference](docs/configuration.md#container-labels) and the [operations guide](docs/operations.md).
 
 The standalone controller historically defaults to skipping UniFi TLS verification; set `UNIFI_SKIP_TLS_VERIFY=false` explicitly. The plugin verifies TLS by default. A read-only Docker socket bind still grants access to a powerful API; protect the socket and the host.
 
@@ -115,6 +115,10 @@ The standalone controller historically defaults to skipping UniFi TLS verificati
 With the Go toolchain required by `go.mod`:
 
 ```sh
+gofmt -l .                      # must print nothing
+go vet ./...
+go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 go test -race ./...
 TRAEFIK_IMAGE=traefik:v3.7.19 go test -race ./traefik -run TestTraefikPlugin -v -count=1
 docker build --build-arg VERSION=v0.0.0-smoke -t bollard:smoke .

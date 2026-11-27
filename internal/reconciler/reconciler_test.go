@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"testing"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+// fakeStore keeps rows in a map. The first row of a container is keyed by its container ID (so
+// single-hostname tests can index it directly); further rows use "<container>#<hostname>".
 type fakeStore struct {
 	records   map[string]store.Record
 	createErr error
@@ -27,11 +30,26 @@ func (f *fakeStore) Create(_ context.Context, r store.Record) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
-	if _, exists := f.records[r.ContainerID]; exists {
-		return fmt.Errorf("duplicate container_id %s", r.ContainerID)
+	key := r.ContainerID
+	for _, e := range f.records {
+		if e.ContainerID == r.ContainerID && e.Hostname == r.Hostname {
+			return fmt.Errorf("duplicate row for container %s hostname %s", r.ContainerID, r.Hostname)
+		}
 	}
-	f.records[r.ContainerID] = r
+	if _, taken := f.records[key]; taken {
+		key = r.ContainerID + "#" + r.Hostname
+	}
+	f.records[key] = r
 	return nil
+}
+func (f *fakeStore) Update(_ context.Context, r store.Record) error {
+	for k, e := range f.records {
+		if e.ID == r.ID {
+			f.records[k] = r
+			return nil
+		}
+	}
+	return fmt.Errorf("no row %s", r.ID)
 }
 func (f *fakeStore) Delete(_ context.Context, id string) error {
 	for k, r := range f.records {
@@ -41,20 +59,31 @@ func (f *fakeStore) Delete(_ context.Context, id string) error {
 	}
 	return nil
 }
-func (f *fakeStore) DeleteByContainerID(_ context.Context, cid string) (*store.Record, error) {
-	r, ok := f.records[cid]
-	if !ok {
-		return nil, nil
+func (f *fakeStore) ListByContainerID(_ context.Context, cid string) ([]store.Record, error) {
+	var out []store.Record
+	for _, r := range f.records {
+		if r.ContainerID == cid {
+			out = append(out, r)
+		}
 	}
-	delete(f.records, cid)
-	return &r, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
+	return out, nil
 }
-func (f *fakeStore) GetByContainerID(_ context.Context, cid string) (*store.Record, error) {
-	r, ok := f.records[cid]
-	if !ok {
+func (f *fakeStore) DeleteByContainerID(ctx context.Context, cid string) ([]store.Record, error) {
+	rows, _ := f.ListByContainerID(ctx, cid)
+	for _, r := range rows {
+		_ = f.Delete(ctx, r.ID)
+	}
+	return rows, nil
+}
+
+// GetByContainerID is a test helper: the first row of a container, or nil.
+func (f *fakeStore) GetByContainerID(ctx context.Context, cid string) (*store.Record, error) {
+	rows, _ := f.ListByContainerID(ctx, cid)
+	if len(rows) == 0 {
 		return nil, nil
 	}
-	return &r, nil
+	return &rows[0], nil
 }
 func (f *fakeStore) ListAll(_ context.Context) ([]store.Record, error) {
 	var out []store.Record
@@ -84,6 +113,7 @@ type fakeProvider struct {
 	listErr           error
 	deleteErr         error
 	createResponseErr error
+	updates           []unifi.DNSRecord // records passed to UpdateRecord, in order
 }
 
 func newFakeProvider() *fakeProvider {

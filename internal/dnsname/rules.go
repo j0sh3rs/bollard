@@ -1,15 +1,16 @@
-package traefik
+package dnsname
 
 import (
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"strconv"
-
-	"github.com/j0sh3rs/bollard/internal/dnsname"
 )
 
-func ruleHosts(rule string) []string {
+// RuleHosts returns the canonical, valid DNS names a Traefik router rule matches with a positive
+// Host() matcher, in order of appearance without duplicates. Negated matchers, HostRegexp, HostSNI,
+// wildcards and IP literals yield nothing, and a rule that does not parse yields nothing.
+func RuleHosts(rule string) []string {
 	expr, err := parser.ParseExpr(rule)
 	if err != nil {
 		return nil
@@ -44,8 +45,8 @@ func ruleHosts(rule string) []string {
 				if err != nil {
 					continue
 				}
-				host = dnsname.Canonical(host)
-				if dnsname.Valid(host) && !seen[host] {
+				host = Canonical(host)
+				if Valid(host) && !seen[host] {
 					seen[host] = true
 					hosts = append(hosts, host)
 				}

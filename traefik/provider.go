@@ -439,7 +439,7 @@ func (p *Provider) discover(ctx context.Context) (map[string]bool, error) {
 			if router.Status != "enabled" || router.Provider == "internal" || strings.HasSuffix(router.Name, "@internal") {
 				continue
 			}
-			for _, host := range ruleHosts(router.Rule) {
+			for _, host := range dnsname.RuleHosts(router.Rule) {
 				hosts[host] = true
 			}
 		}

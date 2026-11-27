@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Breaking changes
+
+* `METRICS_ADDR` now defaults to `127.0.0.1:9090` (was `:9090`). Set `METRICS_ADDR=:9090` (or an interface address) on the bollard container to let Prometheus scrape it. The image healthcheck is unaffected.
+* The state store gains a migration that replaces the unique `container_id` constraint with `(instance_tag, container_id, hostname)`, and adds `target`, `drain_until` and `instance_tag` columns. Existing rows are preserved. After upgrading, downgrading to 0.7.x is not supported against the same database; back it up first.
+* The Go APIs `store.NewStore`, `store.Store` and `docker.ParseLabels` changed. They are internal packages, so this affects only forks.
+
+### Features
+
+* **CNAME and AAAA records** via `dns.bollard/record-type`, with `dns.bollard/target` for CNAME and IPv6 inference for AAAA.
+* **Several hostnames per container**: `dns.bollard/hostname` accepts a comma-separated list, one record and one ownership row each.
+* **Network-aware addresses**: `dns.bollard/network` publishes the container's own address on a Docker network, and a container's only macvlan or ipvlan network is used automatically.
+* **Traefik label inference** (`INFER_TRAEFIK_HOSTS=true`): hostnames from `traefik.http.routers.*.rule` for containers without a `dns.bollard/hostname` label. The `Host()` parser now lives in `internal/dnsname` and is shared with the plugin.
+* **Stop drain** (`STOP_DRAIN`): keep a stopped container's record with a short TTL, and let a restarted container take it over with one update.
+* **Dry run** (`DRY_RUN=true`): log creates, updates and deletes against an in-memory overlay of UniFi and the store.
+* **Instance tag** (`BOLLARD_INSTANCE_TAG`): several instances can share a database and a controller without deleting each other's records.
+* **`UNIFI_API_KEY_FILE`** for Docker secrets.
+* `internal/unifi` gains `RecordUpdater` (modern and legacy `PUT`), AAAA and CNAME create/list, and `HTTPError`/`IsRejection`.
+
+### Security
+
+* CI runs `gofmt`, `go vet`, `golangci-lint` and `govulncheck`, and scans the daemon image with Trivy. The release workflow scans the published image and fails on fixed `HIGH`/`CRITICAL` findings.
+* Release binaries and `CHECKSUMS.sha256` are signed with keyless Cosign (`<file>.sigstore.json`), alongside the already signed image.
+* `/metrics` and `/healthz` bind to loopback by default.
+
 ### Bug Fixes
 
 * Mask Postgres DSN passwords, including query credentials, in logs.

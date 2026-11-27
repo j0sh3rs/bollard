@@ -1,8 +1,10 @@
-package traefik
+package dnsname_test
 
 import (
 	"reflect"
 	"testing"
+
+	"github.com/j0sh3rs/bollard/internal/dnsname"
 )
 
 // Wrong matcher or negation handling would register unrelated DNS names.
@@ -22,11 +24,11 @@ func TestRuleHosts(t *testing.T) {
 		{"regexp", "HostRegexp(`.*.home.arpa`)", nil},
 		{"string containing matcher", "Header(`X-Test`, \"Host(`bad.home.arpa`)\")", nil},
 		{"invalid domains", "Host(`*.home.arpa`, `bad_name.home.arpa`, `-bad.home.arpa`, `bad..arpa`, `127.0.0.1`, `a/b.home.arpa`)", nil},
-		{"bad rule", "Host(`broken.home.arpa`", nil},
+		{"unicode case fold", "Host(`\u212a.home.arpa`)", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ruleHosts(tc.rule); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("ruleHosts(%q) = %v, want %v", tc.rule, got, tc.want)
+			if got := dnsname.RuleHosts(tc.rule); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("RuleHosts(%q) = %v, want %v", tc.rule, got, tc.want)
 			}
 		})
 	}

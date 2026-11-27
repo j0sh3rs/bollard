@@ -7,7 +7,7 @@ Task-oriented procedures for the **standalone Docker daemon**. Setup is in [Gett
 ```bash
 docker compose logs --tail=50 bollard
 docker compose ps                       # image healthcheck state
-curl -sf localhost:9090/healthz && echo healthy
+docker run --rm --network container:bollard busybox:stable wget -qO- http://127.0.0.1:9090/healthz && echo healthy
 ```
 
 `/healthz` returns 200 whenever the process is serving; it does not check UniFi or Docker connectivity. Use metrics for that ([Monitoring](monitoring.md)).
@@ -20,7 +20,10 @@ Log messages you should recognise (abridged):
 | `created DNS record` / `deleted DNS record` | Normal lifecycle |
 | `invalid labels on container` | Container skipped; fix labels |
 | `handle event failed` | A start/stop failed (UniFi error, hostname conflict, ambiguous host IP) |
-| `docker event stream error` | The Docker event stream ended while bollard was running (daemon restart, socket loss, or a stream that closed without an error). The process exits non-zero; the restart policy reconnects |
+| `dry-run: would create record` / `would update record` / `would delete record` | `DRY_RUN=true`: the change is logged and applied only to an in-memory overlay |
+| `draining DNS record` / `took over draining DNS record` | `STOP_DRAIN` is set: a stopped container's record is kept with a short TTL, and a container asking for the same name took it over |
+| `could not start draining, deleting now` | The TTL update for a drain failed, so the stop deleted the record immediately |
+| `recovered UniFi record after a failed create` | A create reported an error but the record exists; it is now owned by the container |
 | `hostname ... is reserved` / `reconcile: hostname is reserved` / `adopt: hostname is reserved` | A label asked for a reserved name; the record was not created or adopted. See [SECURITY.md](../SECURITY.md#defaults-to-review) |
 | `hostname ... is reserved, not creating it` | Plugin only: a router rule named the UniFi host, the Traefik API host, `localhost` or a Docker host alias; no record was created |
 | `UniFi TLS certificate verification is disabled` | `UNIFI_SKIP_TLS_VERIFY=true` with no `UNIFI_CA_CERT`; the API key is exposed to anyone who can impersonate the controller |
@@ -34,7 +37,7 @@ Log messages you should recognise (abridged):
 | `metrics server listening` / `metrics listen failed` | The `/metrics` and `/healthz` listener started, or `METRICS_ADDR` could not be bound (the process exits non-zero) |
 | `UniFi unavailable; retrying` | A transient startup failure (connection refused or reset, timeout, 429, 5xx). The delay doubles from 500 ms to 30 s and the process keeps retrying |
 | `unifi client init error` | A permanent startup failure: bad key, invalid certificate, or unknown site. The process exits non-zero |
-| `docker event stream error` | The Docker event stream failed at runtime. The process exits non-zero and the restart policy reconnects |
+| `docker event stream error` | The Docker event stream ended while bollard was running (daemon restart, socket loss, or a stream that closed without an error). The process exits non-zero and the restart policy reconnects |
 | `shutting down` | SIGTERM or SIGINT received. The process exits 0 |
 
 While the controller is merely unreachable, bollard logs `UniFi unavailable; retrying` and keeps trying until it recovers or you stop it. `bollard_up` stays `0` during that time even though `/healthz` returns 200. Configuration, site, authentication, and certificate errors exit non-zero; read the last log line before the exit. See [UniFi error messages](#unifi-error-messages).
@@ -43,7 +46,7 @@ While the controller is merely unreachable, bollard logs `UniFi unavailable; ret
 
 Use `--adopt` when the state store was lost or replaced and UniFi already holds the records, or when you moved bollard to a new host.
 
-For each running, enabled, labelled container without a store row, bollard adopts only a sole enabled A record with the same hostname and IP. It creates a record if the name is free, and skips anything else. It never deletes during adoption, and continues into normal operation when the phase finishes.
+For each running, enabled, labelled container that has no store row, bollard adopts a sole existing record with the same hostname when its type matches and its value (address, or CNAME target) is the one the container would publish, and the record is enabled. It creates a record if the name is free, and skips anything else. It never deletes during adoption, and continues into normal operation when the phase finishes. A container that already has some rows is left to reconcile, which creates its missing hostnames within one tick.
 
 If two running containers carry the same `dns.bollard/hostname` label, only the first one processed gets a store row; the rest are rejected as hostname conflicts and logged (`adopt: hostname already owned, skipping` or a failed record creation). Fix the duplicate label — bollard enforces one container per hostname (see [Architecture](architecture.md)).
 
@@ -67,13 +70,13 @@ Adopt does not touch records for containers that are no longer running; see the 
 
 bollard handles the common cases automatically: if the store still has a row for the container (stopped while bollard was down, lost `die` event, or a failed stop delete), the next reconcile tick deletes the record and logs `reconcile: deleted record for stopped container`. Manual cleanup remains only for records with **no** store row — for example after the store was reset or lost without running `--adopt`, or records created by other tools.
 
-For the no-row case, list the records and compare against running containers:
+For the no-row case, list the records and compare against running containers (`record_type` is `A`, `AAAA` or `CNAME`; `ip` is empty and `target` is set for CNAME):
 
 ```bash
 # SQLite: owned records
-sqlite3 /path/to/bollard.db "SELECT hostname, ip, unifi_record_id FROM records ORDER BY hostname;"
+sqlite3 /path/to/bollard.db "SELECT hostname, record_type, ip, target, unifi_record_id FROM records ORDER BY hostname;"
 # Postgres
-psql "$DATABASE_URL" -c "SELECT hostname, ip, unifi_record_id FROM records ORDER BY hostname;"
+psql "$DATABASE_URL" -c "SELECT hostname, record_type, ip, target, unifi_record_id FROM records ORDER BY hostname;"
 
 docker ps --filter label=dns.bollard/hostname --format '{{.Names}}'
 ```
@@ -130,7 +133,43 @@ Read the [CHANGELOG](../CHANGELOG.md) first for minor and major versions. Embedd
 
 ## Rotate the UniFi API key
 
-Create a new key in UniFi, update `UNIFI_API_KEY`, run `docker compose up -d bollard` (environment changes need a recreate), then delete the old key.
+Create a new key in UniFi, update `UNIFI_API_KEY` (or the file behind `UNIFI_API_KEY_FILE`), run `docker compose up -d bollard` (the key is read at startup, so the container must be recreated or restarted), then delete the old key.
+
+## Use a Docker secret for the API key
+
+```yaml
+services:
+  bollard:
+    environment:
+      UNIFI_API_KEY_FILE: /run/secrets/unifi_api_key
+    secrets: [unifi_api_key]
+
+secrets:
+  unifi_api_key:
+    file: ./secrets/unifi_api_key   # one line, mode 0600
+```
+
+Do not also set `UNIFI_API_KEY`; setting both is a startup error.
+
+## Try labels with a dry run
+
+Run a second instance with `DRY_RUN=true` and a throwaway or the real store. It reads UniFi and the store and logs every record it would create, update or delete, without changing either:
+
+```bash
+docker run --rm -e DRY_RUN=true -e UNIFI_HOST=... -e UNIFI_API_KEY_FILE=... \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro -v bollard-data:/data -e DATABASE_URL=file:/data/bollard.db \
+  ghcr.io/j0sh3rs/bollard:<tag>
+```
+
+Look for `dry-run: would create record` lines and for conflict warnings. A dry run never writes ownership rows, but it still runs any pending store migrations on startup, so point it at a copy of the store if you must not touch the original. Stop the live instance first if you use SQLite, which allows one writer. Events apply as containers start, and the first reconcile runs one `RECONCILE_INTERVAL` after startup, so use `RECONCILE_INTERVAL=10s` to see the reconcile output quickly.
+
+## Restart containers without a DNS gap
+
+Set `STOP_DRAIN=30s` (any duration longer than your usual restart). A stop then keeps the record, with a TTL of at most 10 seconds, until the period ends, and a container that asks for the same hostname in the meantime takes the record over with one update. Look for `draining DNS record` on the stop and `took over draining DNS record` on the start. A container that does not return has its record deleted when the period ends (`reconcile: deleted record for stopped container`). See [Stop drain](architecture.md#stop-drain).
+
+## Run several instances on one controller
+
+Give each instance its own `BOLLARD_INSTANCE_TAG` (for example the host name). The tag scopes the ownership rows, so instances can share a Postgres database, or just share the UniFi site, without deleting each other's records. Their containers must still use different hostnames: the second instance to ask for a name finds it occupied and refuses to create it. Existing rows keep the empty tag, so the first instance can stay untagged. See [Instance tag](architecture.md#instance-tag).
 
 ## Stop and restart
 
@@ -149,22 +188,34 @@ Any other exit is non-zero, so `restart: unless-stopped` restarts it. Environmen
 
 ## Verify a release
 
-Release images are built for `linux/amd64` and `linux/arm64`, carry provenance and an SBOM, and are signed with keyless Cosign from the release workflow. Release binaries and an SPDX SBOM are attached to each GitHub release with a `CHECKSUMS.sha256` file.
+Release images are built for `linux/amd64` and `linux/arm64`, carry provenance and an SBOM, and are signed with keyless Cosign from the release workflow. Release binaries and an SPDX SBOM are attached to each GitHub release with a `CHECKSUMS.sha256` file. Each binary and the checksum file also have a Sigstore bundle (`<file>.sigstore.json`) signed by the same workflow identity. The release workflow scans the published image with Trivy and fails on fixed `HIGH` and `CRITICAL` findings; pull requests are scanned the same way before merge.
 
 ```bash
-cosign verify ghcr.io/j0sh3rs/bollard:<tag> \
-  --certificate-identity-regexp '^https://github.com/j0sh3rs/bollard/\.github/workflows/release-please\.yml@' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+IDENTITY='^https://github.com/j0sh3rs/bollard/\.github/workflows/release-please\.yml@'
+ISSUER=https://token.actions.githubusercontent.com
 
-sha256sum -c CHECKSUMS.sha256   # after downloading the binaries and checksum file
+cosign verify ghcr.io/j0sh3rs/bollard:<tag> \
+  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
+
+# After downloading a binary, CHECKSUMS.sha256 and their .sigstore.json bundles:
+for f in bollard-linux-amd64 CHECKSUMS.sha256; do
+  cosign verify-blob "$f" --bundle "$f.sigstore.json" \
+    --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER"
+done
+sha256sum -c CHECKSUMS.sha256 --ignore-missing
 ```
 
 The running version appears in the `bollard starting` log line and in `bollard_build_info`. Builds that include the `-version` flag also print it with `/bollard -version`.
 
 ## Verify metrics
 
+`/metrics` listens on loopback by default, and the image has no shell or curl, so query it from a throwaway container in bollard's network namespace:
+
 ```bash
-curl -s localhost:9090/metrics | grep -E '^bollard_(up|records_active|reconcile_last_timestamp_seconds)'
+docker run --rm --network container:bollard busybox:stable wget -qO- http://127.0.0.1:9090/metrics \
+  | grep -E '^bollard_(up|records_active|reconcile_last_timestamp_seconds)'
 ```
+
+If you set `METRICS_ADDR` to a reachable address, `curl` it from the host instead.
 
 See [Monitoring](monitoring.md) for metric labels and alerting examples.

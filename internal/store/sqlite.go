@@ -17,12 +17,16 @@ import (
 var migrationsFS embed.FS
 
 type sqliteStore struct {
-	db *sql.DB
+	db  *sql.DB
+	tag string
 }
 
 // NewSQLite opens a SQLite database at the given DSN, runs migrations, and
 // returns a Store implementation.
-func NewSQLite(dsn string) (Store, error) {
+func NewSQLite(dsn, instanceTag string) (Store, error) {
+	if err := validateTag(instanceTag); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open sqlite: %w", err)
@@ -32,7 +36,7 @@ func NewSQLite(dsn string) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
-	return &sqliteStore{db: db}, nil
+	return &sqliteStore{db: db, tag: instanceTag}, nil
 }
 
 func runMigrations(db *sql.DB) error {
@@ -54,13 +58,18 @@ func runMigrations(db *sql.DB) error {
 	return nil
 }
 
+func timeStr(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
 func (s *sqliteStore) Create(ctx context.Context, r Record) error {
+	var drain any
+	if !r.DrainUntil.IsZero() {
+		drain = timeStr(r.DrainUntil)
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO records (id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.ContainerID, r.Hostname, r.IP, r.RecordType, r.TTL, r.UnifiRecordID,
-		r.CreatedAt.UTC().Format(time.RFC3339),
-		r.UpdatedAt.UTC().Format(time.RFC3339),
+		`INSERT INTO records (`+recordCols+`, instance_tag)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ContainerID, r.Hostname, r.IP, r.RecordType, r.TTL, r.UnifiRecordID, r.Target, drain,
+		timeStr(r.CreatedAt), timeStr(r.UpdatedAt), s.tag,
 	)
 	if err != nil {
 		return fmt.Errorf("store: create record: %w", err)
@@ -68,78 +77,86 @@ func (s *sqliteStore) Create(ctx context.Context, r Record) error {
 	return nil
 }
 
+func (s *sqliteStore) Update(ctx context.Context, r Record) error {
+	var drain any
+	if !r.DrainUntil.IsZero() {
+		drain = timeStr(r.DrainUntil)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE records SET container_id = ?, ip = ?, ttl = ?, unifi_record_id = ?, target = ?, drain_until = ?, updated_at = ?
+		 WHERE id = ? AND instance_tag = ?`,
+		r.ContainerID, r.IP, r.TTL, r.UnifiRecordID, r.Target, drain, timeStr(r.UpdatedAt), r.ID, s.tag,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update record: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: update record: %w", err)
+	} else if n == 0 {
+		return errNoRow(r.ID)
+	}
+	return nil
+}
+
 func (s *sqliteStore) Delete(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM records WHERE id = ?`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM records WHERE id = ? AND instance_tag = ?`, id, s.tag)
 	return err
 }
 
-func (s *sqliteStore) DeleteByContainerID(ctx context.Context, containerID string) (*Record, error) {
-	row := s.db.QueryRowContext(ctx,
-		`DELETE FROM records WHERE container_id = ?
-		 RETURNING id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at`,
-		containerID,
-	)
-	r, err := scanRecord(row)
+func (s *sqliteStore) ListByContainerID(ctx context.Context, containerID string) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+recordCols+` FROM records WHERE container_id = ? AND instance_tag = ? ORDER BY hostname`,
+		containerID, s.tag)
+	if err != nil {
+		return nil, fmt.Errorf("store: list by container id: %w", err)
+	}
+	return collect(rows, scanRecord)
+}
+
+func (s *sqliteStore) DeleteByContainerID(ctx context.Context, containerID string) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`DELETE FROM records WHERE container_id = ? AND instance_tag = ? RETURNING `+recordCols,
+		containerID, s.tag)
 	if err != nil {
 		return nil, fmt.Errorf("store: delete by container id: %w", err)
 	}
-	return r, nil
-}
-
-func (s *sqliteStore) GetByContainerID(ctx context.Context, containerID string) (*Record, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at
-		 FROM records WHERE container_id = ?`, containerID)
-	return scanRecord(row)
+	return collect(rows, scanRecord)
 }
 
 func (s *sqliteStore) ListAll(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at FROM records`)
+		`SELECT `+recordCols+` FROM records WHERE instance_tag = ? ORDER BY hostname, container_id`, s.tag)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all: %w", err)
 	}
-	defer rows.Close()
-	var records []Record
-	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, *r)
-	}
-	return records, rows.Err()
+	return collect(rows, scanRecord)
 }
 
 func (s *sqliteStore) Close() error {
 	return s.db.Close()
 }
 
-// scanner is a common interface between *sql.Row and *sql.Rows.
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRecord(s scanner) (*Record, error) {
+func scanRecord(s scanner) (Record, error) {
 	var r Record
+	var drain sql.NullString
 	var createdStr, updatedStr string
 	err := s.Scan(
 		&r.ID, &r.ContainerID, &r.Hostname, &r.IP, &r.RecordType,
-		&r.TTL, &r.UnifiRecordID, &createdStr, &updatedStr,
+		&r.TTL, &r.UnifiRecordID, &r.Target, &drain, &createdStr, &updatedStr,
 	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("store: scan record: %w", err)
+		return Record{}, fmt.Errorf("store: scan record: %w", err)
 	}
-	r.CreatedAt, err = time.Parse(time.RFC3339, createdStr)
-	if err != nil {
-		return nil, fmt.Errorf("store: parse created_at: %w", err)
+	if drain.Valid {
+		if r.DrainUntil, err = time.Parse(time.RFC3339, drain.String); err != nil {
+			return Record{}, fmt.Errorf("store: parse drain_until: %w", err)
+		}
 	}
-	r.UpdatedAt, err = time.Parse(time.RFC3339, updatedStr)
-	if err != nil {
-		return nil, fmt.Errorf("store: parse updated_at: %w", err)
+	if r.CreatedAt, err = time.Parse(time.RFC3339, createdStr); err != nil {
+		return Record{}, fmt.Errorf("store: parse created_at: %w", err)
 	}
-	return &r, nil
+	if r.UpdatedAt, err = time.Parse(time.RFC3339, updatedStr); err != nil {
+		return Record{}, fmt.Errorf("store: parse updated_at: %w", err)
+	}
+	return r, nil
 }

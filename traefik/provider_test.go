@@ -103,11 +103,12 @@ func TestReconcileAPIFailuresNeverWrite(t *testing.T) {
 				}
 				switch r.URL.Path {
 				case "/api/http/routers":
-					if failure == "traefik-status" {
+					switch failure {
+					case "traefik-status":
 						w.WriteHeader(401)
-					} else if failure == "traefik-json" {
+					case "traefik-json":
 						fmt.Fprint(w, "invalid")
-					} else {
+					default:
 						fmt.Fprint(w, `[{"name":"app@file","status":"enabled","rule":"Host(`+"`app.home.arpa`"+`)"}]`)
 					}
 				case "/proxy/network/integration/v1/sites":

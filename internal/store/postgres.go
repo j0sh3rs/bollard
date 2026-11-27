@@ -17,12 +17,16 @@ import (
 var migrationsPgFS embed.FS
 
 type postgresStore struct {
-	db *sql.DB
+	db  *sql.DB
+	tag string
 }
 
 // NewPostgres opens a Postgres database at the given DSN, runs migrations, and
 // returns a Store implementation.
-func NewPostgres(dsn string) (Store, error) {
+func NewPostgres(dsn, instanceTag string) (Store, error) {
+	if err := validateTag(instanceTag); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store: open postgres: %w", err)
@@ -32,7 +36,7 @@ func NewPostgres(dsn string) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate postgres: %w", err)
 	}
-	return &postgresStore{db: db}, nil
+	return &postgresStore{db: db, tag: instanceTag}, nil
 }
 
 func runPostgresMigrations(db *sql.DB) error {
@@ -54,13 +58,20 @@ func runPostgresMigrations(db *sql.DB) error {
 	return nil
 }
 
+// nullTime maps the zero time to SQL NULL.
+func nullTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC()
+}
+
 func (s *postgresStore) Create(ctx context.Context, r Record) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO records (id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		r.ID, r.ContainerID, r.Hostname, r.IP, r.RecordType, r.TTL, r.UnifiRecordID,
-		r.CreatedAt.UTC(),
-		r.UpdatedAt.UTC(),
+		`INSERT INTO records (`+recordCols+`, instance_tag)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		r.ID, r.ContainerID, r.Hostname, r.IP, r.RecordType, r.TTL, r.UnifiRecordID, r.Target,
+		nullTime(r.DrainUntil), r.CreatedAt.UTC(), r.UpdatedAt.UTC(), s.tag,
 	)
 	if err != nil {
 		return fmt.Errorf("store: create record: %w", err)
@@ -68,47 +79,55 @@ func (s *postgresStore) Create(ctx context.Context, r Record) error {
 	return nil
 }
 
+func (s *postgresStore) Update(ctx context.Context, r Record) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE records SET container_id = $1, ip = $2, ttl = $3, unifi_record_id = $4, target = $5, drain_until = $6, updated_at = $7
+		 WHERE id = $8 AND instance_tag = $9`,
+		r.ContainerID, r.IP, r.TTL, r.UnifiRecordID, r.Target, nullTime(r.DrainUntil), r.UpdatedAt.UTC(), r.ID, s.tag,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update record: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: update record: %w", err)
+	} else if n == 0 {
+		return errNoRow(r.ID)
+	}
+	return nil
+}
+
 func (s *postgresStore) Delete(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM records WHERE id = $1`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM records WHERE id = $1 AND instance_tag = $2`, id, s.tag)
 	return err
 }
 
-func (s *postgresStore) DeleteByContainerID(ctx context.Context, containerID string) (*Record, error) {
-	row := s.db.QueryRowContext(ctx,
-		`DELETE FROM records WHERE container_id = $1
-		 RETURNING id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at`,
-		containerID,
-	)
-	r, err := scanPgRecord(row)
+func (s *postgresStore) ListByContainerID(ctx context.Context, containerID string) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+recordCols+` FROM records WHERE container_id = $1 AND instance_tag = $2 ORDER BY hostname`,
+		containerID, s.tag)
+	if err != nil {
+		return nil, fmt.Errorf("store: list by container id: %w", err)
+	}
+	return collect(rows, scanPgRecord)
+}
+
+func (s *postgresStore) DeleteByContainerID(ctx context.Context, containerID string) ([]Record, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`DELETE FROM records WHERE container_id = $1 AND instance_tag = $2 RETURNING `+recordCols,
+		containerID, s.tag)
 	if err != nil {
 		return nil, fmt.Errorf("store: delete by container id: %w", err)
 	}
-	return r, nil
-}
-
-func (s *postgresStore) GetByContainerID(ctx context.Context, containerID string) (*Record, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at
-		 FROM records WHERE container_id = $1`, containerID)
-	return scanPgRecord(row)
+	return collect(rows, scanPgRecord)
 }
 
 func (s *postgresStore) ListAll(ctx context.Context) ([]Record, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, container_id, hostname, ip, record_type, ttl, unifi_record_id, created_at, updated_at FROM records`)
+		`SELECT `+recordCols+` FROM records WHERE instance_tag = $1 ORDER BY hostname, container_id`, s.tag)
 	if err != nil {
 		return nil, fmt.Errorf("store: list all: %w", err)
 	}
-	defer rows.Close()
-	var records []Record
-	for rows.Next() {
-		r, err := scanPgRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, *r)
-	}
-	return records, rows.Err()
+	return collect(rows, scanPgRecord)
 }
 
 func (s *postgresStore) Close() error {
@@ -117,20 +136,21 @@ func (s *postgresStore) Close() error {
 
 // scanPgRecord scans a Postgres row directly into time.Time fields (TIMESTAMPTZ
 // round-trips cleanly without string intermediaries).
-func scanPgRecord(s scanner) (*Record, error) {
+func scanPgRecord(s scanner) (Record, error) {
 	var r Record
+	var drain sql.NullTime
 	var createdAt, updatedAt time.Time
 	err := s.Scan(
 		&r.ID, &r.ContainerID, &r.Hostname, &r.IP, &r.RecordType,
-		&r.TTL, &r.UnifiRecordID, &createdAt, &updatedAt,
+		&r.TTL, &r.UnifiRecordID, &r.Target, &drain, &createdAt, &updatedAt,
 	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
 	if err != nil {
-		return nil, fmt.Errorf("store: scan record: %w", err)
+		return Record{}, fmt.Errorf("store: scan record: %w", err)
+	}
+	if drain.Valid {
+		r.DrainUntil = drain.Time.UTC()
 	}
 	r.CreatedAt = createdAt.UTC()
 	r.UpdatedAt = updatedAt.UTC()
-	return &r, nil
+	return r, nil
 }

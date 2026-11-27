@@ -45,6 +45,17 @@ jobs:
           sha256sum bollard-linux-amd64 bollard-linux-arm64 \
             > CHECKSUMS.sha256
 
+      - name: Install Cosign
+        if: ${{ steps.release.outputs.release_created }}
+        uses: sigstore/cosign-installer@v4.1.4
+
+      - name: Sign release binaries and checksums
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          for f in bollard-linux-amd64 bollard-linux-arm64 CHECKSUMS.sha256; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
       - name: Generate SBOM for binaries
         if: ${{ steps.release.outputs.release_created }}
         uses: anchore/sbom-action@v0
@@ -63,7 +74,10 @@ jobs:
           gh release upload "$VER" \
             bollard-linux-amd64 \
             bollard-linux-arm64 \
+            bollard-linux-amd64.sigstore.json \
+            bollard-linux-arm64.sigstore.json \
             CHECKSUMS.sha256 \
+            CHECKSUMS.sha256.sigstore.json \
             sbom.spdx.json
 
       - name: Set up Docker Buildx
@@ -96,10 +110,6 @@ jobs:
             ${{ env.TAG }}:${{ env.VER }}
             ${{ env.TAG }}:latest
 
-      - name: Install Cosign
-        if: ${{ steps.release.outputs.release_created }}
-        uses: sigstore/cosign-installer@v4.1.4
-
       - name: Sign Docker image
         if: ${{ steps.release.outputs.release_created }}
         env:
@@ -107,3 +117,12 @@ jobs:
           VER: ${{ steps.release.outputs.tag_name }}
           DIG: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "$TAG:$VER@$DIG"
+
+      - name: Scan published image with Trivy
+        if: ${{ steps.release.outputs.release_created }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

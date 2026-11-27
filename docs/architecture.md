@@ -21,7 +21,7 @@ Docker socket ──► Watcher ──► Reconciler ◄── ticker (RECONCILE
                               (SQLite or      (modern DNS policies,
                                Postgres)       legacy static-DNS fallback)
 
-main.go also serves /metrics and /healthz on METRICS_ADDR.
+main.go also serves /metrics and /healthz on METRICS_ADDR (default 127.0.0.1:9090).
 ```
 
 ## Startup
@@ -45,20 +45,21 @@ Once running, the process exits **non-zero** with `docker event stream error` wh
 ### Container start
 
 1. Docker emits a `start` event; the watcher forwards it with the container's labels.
-2. The label parser returns nothing for containers without `dns.bollard/hostname`. Invalid labels are logged as a warning and the container is skipped.
+2. The label parser returns nothing for containers without `dns.bollard/hostname` (or, with `INFER_TRAEFIK_HOSTS`, without Traefik `Host()` rules). Invalid labels are logged as a warning and the container is skipped.
 3. A disabled container (`dns.bollard/enabled=false`) is a no-op.
-4. The reconciler checks the store and UniFi for the canonical hostname. Any record at that name blocks creation, including disabled records and other types. A failed UniFi listing also blocks creation.
-5. The host IP is resolved (see [IP resolution](#ip-resolution)).
-6. The UniFi provider creates the A record and returns a record ID.
-7. The store persists `{container_id, hostname, ip, record_type, ttl, unifi_record_id}`. If this write fails, the reconciler deletes the record it just created, on a context that survives shutdown cancellation. A failed rollback is logged as `rollback delete of unowned UniFi record failed` and the name stays reserved for the tick.
+4. If the container already has ownership rows, the event is ignored: reconcile owns repairs, and a repeated start must not replace or extend rows.
+5. For each requested hostname the reconciler checks the store and UniFi for the canonical name. A name held by a **draining** row is taken over; any other owner, or any record at that name in UniFi (including disabled records and other types), blocks creation of that name only. A failed UniFi listing also blocks creation. The other hostnames are still processed, and every failure is returned together.
+6. The record value is resolved (see [IP resolution](#ip-resolution)).
+7. The UniFi provider creates the record (A, AAAA or CNAME) and returns a record ID.
+8. The store persists one row per hostname. If this write fails, the reconciler deletes the record it just created, on a context that survives shutdown cancellation. A failed rollback is logged as `rollback delete of unowned UniFi record failed` and the name stays reserved for the tick.
 
-If the create call itself fails ambiguously (timeout, lost response, 5xx, or no ID returned), the record may exist anyway. The reconciler lists again and claims the record only when exactly one A record matches the hostname and IP and no other store row owns it. A 4xx answer (for example 409) means UniFi refused the create, so nothing is claimed.
+If the create call itself fails ambiguously (timeout, lost response, 5xx, or no ID returned), the record may exist anyway. The reconciler lists again and claims the record only when exactly one record matches the hostname, type and value (address or target) and no other store row owns it. A 4xx answer (for example 409) means UniFi refused the create, so nothing is claimed.
 
 ### Container stop
 
 1. Docker emits `die` or `destroy`; the watcher reports both as `stop`. (`docker stop` produces `die`.)
-2. The store row is looked up by container ID. No row means no-op.
-3. The UniFi record is deleted by its stored ID. A 404 from UniFi counts as success. If this fails, the store row is **kept** and the error is logged and returned — the next reconcile tick retries the delete. After the record is gone, the store row is deleted; if that store write fails, orphan cleanup removes the row on the next tick.
+2. The store rows of the container are looked up by container ID. No rows means no-op.
+3. For each row, the UniFi record is deleted by its stored ID, or put into [drain](#stop-drain) when `STOP_DRAIN` is set. A 404 from UniFi counts as success. If this fails, the store row is **kept** and the error is logged and returned — the next reconcile tick retries the delete. After the record is gone, the store row is deleted; if that store write fails, orphan cleanup removes the row on the next tick. One row failing does not stop the others.
 
 ### Periodic reconcile
 
@@ -79,16 +80,20 @@ The daemon lists all UniFi records. Disabling an owned record does not drop its 
 Ownership lives in the state store, not in DNS metadata:
 
 ```
-container_id  →  { hostname, ip, record_type, ttl, unifi_record_id }
+(instance_tag, container_id, hostname)  →  { ip, record_type, target, ttl, unifi_record_id, drain_until }
 ```
 
-`container_id` is unique. Deletes use the stored `unifi_record_id` directly, so bollard never deletes UniFi records it did not create or adopt by name.
+A container with several hostnames has one row per hostname, each with its own UniFi record; `(instance_tag, container_id, hostname)` is unique. Deletes use the stored `unifi_record_id` directly, so bollard never deletes UniFi records it did not create or adopt by name.
 
 **Why not TXT ownership records?** They need two records per hostname and DNS queries on every pass. A local store is simpler. The cost: the store is the source of truth, and losing it requires `--adopt`.
 
 ### Store backends
 
-`store.NewStore` picks the backend from `DATABASE_URL`: a `postgres://` or `postgresql://` DSN uses Postgres (pgx, pool of 10, embedded migrations in `migrations_pg`); anything else uses SQLite (modernc driver, one connection, embedded migrations). Both are active in current code and share the same schema. Postgres is the only backend that sensibly survives host loss; SQLite needs a persistent volume. Never run two bollard instances against one store or one UniFi site: there is no leader election and no instance tag (see [Roadmap](ROADMAP.md)).
+`store.NewStore` picks the backend from `DATABASE_URL`: a `postgres://` or `postgresql://` DSN uses Postgres (pgx, pool of 10, embedded migrations in `migrations_pg`); anything else uses SQLite (modernc driver, one connection, embedded migrations). Both are active in current code and share the same schema. Postgres is the only backend that sensibly survives host loss; SQLite needs a persistent volume.
+
+### Instance tag
+
+Every row carries an `instance_tag` (`BOLLARD_INSTANCE_TAG`, default empty) and every query filters on it, so instances with different tags can share one database and one UniFi site without treating each other's rows as their own: without the filter, instance A would see instance B's rows, find their containers missing from its own Docker host, and delete B's live records. Tags isolate ownership only. There is still no leader election and no cross-instance name arbitration: two instances asking for the same hostname are resolved by the existing rule that an occupied name blocks creation, first writer wins. Running two instances with the **same** tag against one store remains unsupported.
 
 ## Adopt phase
 
@@ -115,12 +120,39 @@ So adopt can create records; it never deletes any. See [Operations](operations.m
 
 ## IP resolution
 
-An `ip-override` label wins. Otherwise the resolver inspects the **host's** network interfaces, once, on first use, and caches the result for the process lifetime:
+The value of an `A` or `AAAA` record is chosen in this order, per record:
 
-- ignores down, loopback, link-local, and Docker/virtual interfaces (`docker*`, `br-*`, `veth*`, `virbr*`, `flannel*`, `cni*`, `tunl*`, `weave*`);
-- requires **exactly one** remaining IPv4 address. Zero or more than one is an error and the record is not created; set `dns.bollard/ip-override` or fix the interfaces.
+1. `dns.bollard/ip-override`.
+2. `dns.bollard/network`: the container's own address on that network. Not being on it, or having no address of the right family there, is an error and nothing is created.
+3. The container's **only macvlan or ipvlan network**: those attach a container directly to a LAN segment, so its own address is the reachable one. Several such networks are ambiguous and are an error; name one with `dns.bollard/network`. Bridge and overlay addresses are never picked automatically.
+4. The **host's** address. The resolver inspects the host's interfaces once, on first use, caches the result for the process lifetime, and ignores down, loopback, link-local and Docker/virtual interfaces (`docker*`, `br-*`, `veth*`, `virbr*`, `flannel*`, `cni*`, `tunl*`, `weave*`). For `A` it needs **exactly one** remaining IPv4 address; for `AAAA`, exactly one global or unique-local (`fc00::/7`) IPv6 address. Zero or more than one is an error and the record is not created.
 
-It does not inspect the container's own networks. Restart bollard if the host IP changes.
+Steps 2 and 3 inspect the container and its networks through the Docker API at the time the record is created. A failed inspection fails the create closed instead of publishing the host's address for a container that may have its own. Restart bollard if the host address changes.
+
+## Record types
+
+| Type | Value | Notes |
+|---|---|---|
+| `A` | IPv4 | default |
+| `AAAA` | IPv6 | `ipv6Address` on the modern API, `record_type: "AAAA"` on the legacy one |
+| `CNAME` | target hostname from `dns.bollard/target` | `targetDomain` on the modern API; the value is the target on the legacy one |
+
+Occupancy is by name, whatever the type: any record at a hostname blocks creation, and adoption accepts a record only when its type matches and its value (address, or target) is the one the container would publish. The wire formats were checked against UniFi's published API reference and a third-party provider that uses them; the daemon has not been run against every controller version.
+
+## Stop drain
+
+With `STOP_DRAIN` above zero, a stop does not delete. For each row of the container the reconciler lowers the record's TTL (to the smaller of the row's TTL and 10 s) with an update call, stores `drain_until = now + STOP_DRAIN` on the row, and leaves the record in place. From then on:
+
+- If a container asks for that hostname before `drain_until` (start event, or the next reconcile tick if the event was missed), it **takes the record over**: one update call sets the new address and the requested TTL, and the row moves to the new container. The name never stops resolving.
+- Reconcile's retry-delete pass skips the row until `drain_until`, then deletes the record and the row as for any stopped container.
+- If the update call fails, the stop falls back to the immediate delete: cleanup beats a courtesy to restarts.
+- Takeover is by hostname, not by container identity: any container that requests a draining name takes the record over, including one that is not a restart of the old container. Until then the draining row keeps the name reserved against creation by every other path.
+
+The state is one nullable column, `drain_until`; nothing else tracks it, so a crash mid-drain is safe: the next tick sees the row and either waits or deletes.
+
+## Dry run
+
+`DRY_RUN=true` wraps the UniFi provider and the store in overlays. Reads go to the real UniFi controller and the real store; creates, updates and deletes are logged (`dry-run: would ...`) and applied to in-memory overlays that later ticks read back. The overlays are lost on exit. All decision code (conflict checks, reserved names, address selection, drain) runs for real, so the output is what a live run would do from the same starting state.
 
 ## Shutdown
 

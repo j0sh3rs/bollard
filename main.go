@@ -22,6 +22,7 @@ import (
 	"github.com/j0sh3rs/bollard/internal/config"
 	"github.com/j0sh3rs/bollard/internal/dnsname"
 	dockerwatcher "github.com/j0sh3rs/bollard/internal/docker"
+	"github.com/j0sh3rs/bollard/internal/dryrun"
 	bollardlog "github.com/j0sh3rs/bollard/internal/log"
 	"github.com/j0sh3rs/bollard/internal/metrics"
 	"github.com/j0sh3rs/bollard/internal/reconciler"
@@ -56,7 +57,7 @@ func main() {
 
 func checkHealth(addr string) error {
 	if addr == "" {
-		addr = ":9090"
+		addr = "127.0.0.1:9090"
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -125,12 +126,16 @@ func run(adopt bool) int {
 		}
 	}()
 
-	db, err := store.NewStore(cfg.DatabaseURL)
+	baseDB, err := store.NewStore(cfg.DatabaseURL, cfg.InstanceTag)
 	if err != nil {
 		logger.Error("state store unavailable", "err", err)
 		return 1
 	}
-	defer db.Close()
+	defer baseDB.Close()
+	db := store.Store(baseDB)
+	if cfg.DryRun {
+		db = dryrun.NewStore(baseDB)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -164,6 +169,9 @@ func run(adopt bool) int {
 	if closer, ok := provider.(interface{ CloseIdleConnections() }); ok {
 		defer closer.CloseIdleConnections()
 	}
+	if cfg.DryRun {
+		provider = dryrun.New(provider, logger)
+	}
 
 	watcher, err := dockerwatcher.NewWatcher()
 	if err != nil {
@@ -184,7 +192,12 @@ func run(adopt bool) int {
 
 	lister := &dockerLister{client: listerClient}
 	rec := reconciler.New(db, provider, lister, "", m, logger).
-		WithReservedHostnames(reservedHostnames(cfg.UnifiHost, cfg.DatabaseURL, os.Getenv("DOCKER_HOST"))...)
+		WithReservedHostnames(reservedHostnames(cfg.UnifiHost, cfg.DatabaseURL, os.Getenv("DOCKER_HOST"))...).
+		WithNetworks(lister).
+		WithStopDrain(cfg.StopDrain)
+	if cfg.InferTraefik {
+		rec.WithTraefikInference()
+	}
 
 	if adopt {
 		logger.Info("starting adopt phase")
@@ -221,11 +234,18 @@ func run(adopt bool) int {
 		"unifi_site", cfg.UnifiSite,
 		"unifi_tls_verify", cfg.UnifiCACert != "" || !cfg.UnifiSkipTLSVerify,
 		"database", sanitizeDSN(cfg.DatabaseURL),
+		"instance_tag", cfg.InstanceTag,
 		"reconcile_interval", cfg.ReconcileInterval,
+		"stop_drain", cfg.StopDrain,
+		"infer_traefik_hosts", cfg.InferTraefik,
+		"dry_run", cfg.DryRun,
 		"metrics_addr", cfg.MetricsAddr,
 		"log_format", cfg.LogFormat,
 		"log_level", cfg.LogLevel,
 	)
+	if cfg.DryRun {
+		logger.Warn("DRY_RUN is on: records are logged, not created, changed or deleted, and ownership rows are not written")
+	}
 	if cfg.UnifiCACert == "" && cfg.UnifiSkipTLSVerify {
 		logger.Warn("UniFi TLS certificate verification is disabled; the API key can be captured by anyone who can impersonate the controller. Set UNIFI_SKIP_TLS_VERIFY=false or UNIFI_CA_CERT")
 	}
@@ -441,4 +461,8 @@ func postgresHostnames(dsn string) []string {
 		}
 	}
 	return out
+}
+
+func (d *dockerLister) ContainerNetworks(ctx context.Context, containerID string) (map[string]dockerwatcher.NetworkAddr, error) {
+	return dockerwatcher.ContainerNetworks(ctx, d.client, containerID)
 }

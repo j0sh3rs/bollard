@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # Tests write to httptest responses and close bodies; a failed write fails the assertion anyway.
+      - path: _test\.go
+        linters: [errcheck]
+      # Deferred Close/Write on shutdown paths and response bodies have nothing useful to do with the error.
+      - linters: [errcheck]
+        text: "Error return value of `[^`]*\\.(Close|Write)` is not checked"
+      # "Traefik" and "UniFi" are proper nouns and the messages are documented verbatim.
+      - linters: [staticcheck]
+        text: "ST1005"
